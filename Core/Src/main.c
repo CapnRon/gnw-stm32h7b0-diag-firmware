@@ -478,45 +478,57 @@ int main(void)
 
   /* USER CODE END 2 */
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-
+  /* DIAGNOSTIC BUILD: IWDG_SW option byte flipped 0->1 (software-controlled)
+   * so the hardware IWDG no longer force-starts at reset; all iwdg_kick()
+   * calls removed to test that petting is genuinely no longer required. */
   SCB_EnableICache();
   SCB_EnableDCache();
 
-  // Initialize the external flash
-
   OSPI_Init(&hospi1);
 
-  // Copy instructions and data from extflash to axiram
-  void *copy_areas[3];
+  {
 
-  copy_areas[0] = &_siramdata;  // 0x90000000
-  copy_areas[1] = &__ram_exec_start__;  // 0x24000000
-  copy_areas[2] = &__ram_exec_end__;  // 0x24000000 + length
-  memcpy_no_check(copy_areas[1], copy_areas[0], copy_areas[2] - copy_areas[1]);
+    /* Backlight is DAC-driven and was turned off earlier (lcd_backlight_off()
+     * before lcd_deinit()); nothing in this diagnostic path ever turns it
+     * back on. */
+    lcd_backlight_on();
 
-  // Copy ITCRAM HOT section
-  static uint32_t copy_areas2[4] __attribute__((used));
-  copy_areas2[0] = (uint32_t) &_sitcram_hot;
-  copy_areas2[1] = (uint32_t) &__itcram_hot_start__;
-  copy_areas2[2] = (uint32_t) &__itcram_hot_end__;
-  copy_areas2[3] = copy_areas2[2] - copy_areas2[1];
-  memcpy_no_check((uint32_t *) copy_areas2[1], (uint32_t *) copy_areas2[0], copy_areas2[3]);
+    const uint16_t diag_colors[8] = {
+      0xFFFF, /* white */
+      0xFFE0, /* yellow */
+      0x07FF, /* cyan */
+      0x07E0, /* green */
+      0xF81F, /* magenta */
+      0xF800, /* red */
+      0x001F, /* blue */
+      0x0000, /* black */
+    };
+    int bar_w = GW_LCD_WIDTH / 8;
+    int rotate = 0;
+    uint32_t last_change = HAL_GetTick();
 
-  bq24072_init();
+    while (1) {
+      wdog_refresh();
 
-  switch (boot_mode) {
-  case BOOT_MODE_APP:
-    wdog_enable();
-    // Launch the emulator
-    app_main();
-    break;
-  case BOOT_MODE_FLASHAPP:
-    flashapp_main();
-    break;
-  default:
-    break;
+      uint32_t now = HAL_GetTick();
+      if (now - last_change >= 1000) {
+        last_change = now;
+        rotate = (rotate + 1) % 8;
+
+        uint16_t *diag_fb = (uint16_t *)lcd_get_active_buffer();
+        for (int y = 0; y < GW_LCD_HEIGHT; y++) {
+          for (int x = 0; x < GW_LCD_WIDTH; x++) {
+            int bar = x / bar_w;
+            if (bar > 7) bar = 7;
+            diag_fb[y * GW_LCD_WIDTH + x] = diag_colors[(bar + rotate) % 8];
+          }
+        }
+        lcd_sync();
+        lcd_swap();
+      }
+
+      HAL_Delay(50);
+    }
   }
 
   while (1)
