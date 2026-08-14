@@ -675,6 +675,7 @@ int main(void)
     const int box_w = 60, box_h = 28, gap = 4;
 
     uint32_t prev_buttons = 0;
+    uint32_t power_hold_start = 0;
 
     /* Bouncing image state (classic DVD-screensaver / Amiga demo style). */
     int img_x = 20, img_y = 20;
@@ -733,6 +734,18 @@ int main(void)
        * audibly tested via whatever sound plays right after. */
       if (newly_pressed & (1u << 8)) {
         audio_level = (audio_level >= ODROID_AUDIO_VOLUME_MAX) ? ODROID_AUDIO_VOLUME_MIN : (audio_level + 1);
+      }
+
+      /* Hold POWER (bit9) for 5 seconds to power off. GW_EnterDeepSleep()
+       * (main.c) is self-contained -- unlike odroid_system_sleep(), it does
+       * not depend on the settings/filesystem/gui state this diagnostic
+       * build never initializes. It re-arms the power button as a wakeup
+       * source before entering STANDBY, so pressing POWER again wakes it. */
+      if (newly_pressed & (1u << 9)) {
+        power_hold_start = now;
+      }
+      if ((cur_buttons & (1u << 9)) && (now - power_hold_start >= 5000)) {
+        GW_EnterDeepSleep();
       }
 
       if (newly_pressed) {
