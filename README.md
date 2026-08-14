@@ -1,7 +1,10 @@
 # Game & Watch STM32H7B0 Diagnostic Firmware
 
-This is a diagnostic test firmware for the Nintendo Game & Watch (Zelda edition,
-STM32H7B0VBTx). Use it to check hardware health after a repair. It is a fork of
+This is a diagnostic test firmware for the Nintendo Game & Watch, built and
+tested on the Zelda edition (STM32H7B0VBTx). The button handling keeps the
+Mario edition's shared TIME/SELECT and GAME/START inputs on purpose, so the
+same firmware should also work on the Mario edition (STM32H7A3). Use it to
+check hardware health after a repair. It is a fork of
 [kbeckmann/game-and-watch-retro-go](https://github.com/kbeckmann/game-and-watch-retro-go).
 
 ## Why this firmware exists
