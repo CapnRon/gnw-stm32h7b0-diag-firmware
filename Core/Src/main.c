@@ -34,6 +34,11 @@
 #include "odroid_system.h"
 #include "odroid_overlay.h"
 #include "bq24072.h"
+#include "sound_assets.h"
+#include "porting/common.h" /* volume_tbl[], ODROID_AUDIO_VOLUME_MAX/MIN */
+
+/* audio_level lives in odroid_audio.c but isn't declared in a header. */
+extern uint8_t audio_level;
 
 #include <string.h>
 #include <assert.h>
@@ -95,6 +100,7 @@ static bool wdog_enabled;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MPU_Config(void);
+static void ensure_option_bytes(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_LTDC_Init(void);
@@ -334,6 +340,142 @@ static void memcpy_no_check(uint32_t *dst, uint32_t *src, size_t len)
   }
 }
 
+/* Known-good FLASH_OPTSR value, read directly off a reference unit:
+ * RDP=0xAA (level 0), IWDG_SW=1, NRST_STDY=1, NRST_STOP=1, IWDG_FZ_STOP=1,
+ * IWDG_FZ_SDBY=1, plus one undocumented reserved bit(5) that also reads 1
+ * on the reference unit. */
+#define TARGET_OPTSR_VALUE   0x1006AAF0u
+#define FLASH_OPTSR_CUR_REG  (*(volatile uint32_t *)0x5200201Cu)
+#define FLASH_OPTSR_PRG_REG  (*(volatile uint32_t *)0x52002020u)
+#define FLASH_OPTKEYR_REG    (*(volatile uint32_t *)0x52002008u)
+#define FLASH_OPTCR_REG      (*(volatile uint32_t *)0x52002018u)
+
+/* Set by ensure_option_bytes(): 1 = option bytes already matched the known
+ * -good value on this boot, 0 = they had drifted and were just corrected. */
+static volatile uint8_t option_bytes_were_ok;
+
+static void ensure_option_bytes(void)
+{
+  if (FLASH_OPTSR_CUR_REG == TARGET_OPTSR_VALUE) {
+    option_bytes_were_ok = 1;
+    return;
+  }
+  option_bytes_were_ok = 0;
+
+  FLASH_OPTKEYR_REG = 0x08192A3Bu;
+  FLASH_OPTKEYR_REG = 0x4C5D6E7Fu;
+
+  FLASH_OPTSR_PRG_REG = TARGET_OPTSR_VALUE;
+  FLASH_OPTCR_REG = 0x00000002u; /* OPTSTART, OPTLOCK stays cleared */
+
+  while (FLASH_OPTSR_CUR_REG & 0x1u) {
+    /* wait for OPT_BUSY to clear */
+  }
+}
+
+/* --- Diagnostic sound playback: gapless double-buffered SAI/DMA streaming -
+ * hdma_sai1_a is configured DMA_CIRCULAR (needed for the real emulator's
+ * gapless audio streaming). We exploit that directly instead of fighting
+ * it: kick ONE circular DMA transfer covering a two-half buffer, and as
+ * hardware plays through each half, refill the *other* (currently silent to
+ * the DMA engine) half with the next chunk of source data -- classic
+ * ping-pong streaming, no stop/restart, no gaps.
+ *
+ * There's no real completion IRQ available to hook (HAL_SAI_TxCpltCallback
+ * is already strongly defined in common.c for the emulator audio path, and
+ * SAI_DMATxCplt() in the HAL explicitly skips resetting hsai->State when
+ * DMA mode is circular -- see stm32h7xx_hal_sai.c), so which half is
+ * currently playing is tracked by elapsed wall-clock time instead. */
+#define SND_SAMPLE_RATE_HZ  48000u                      /* matches MX_SAI1_Init() */
+/* hsai_BlockA1.Init.MonoStereoMode = SAI_MONOMODE (confirmed on real hw) --
+ * one 16-bit sample per audio frame, not L+R interleaved. */
+#define SND_HALF_SAMPLES    4000u                       /* mono samples/half, ~83ms */
+#define SND_HALF_DURATION_MS ((SND_HALF_SAMPLES * 1000u) / SND_SAMPLE_RATE_HZ)
+
+static int16_t snd_dbuf[2u * SND_HALF_SAMPLES] __attribute__((aligned(32), section(".diag_ram_emu")));
+static const uint8_t *snd_src_ptr;
+static uint32_t snd_remaining_bytes;
+static volatile uint8_t snd_playing;
+static uint32_t snd_playback_start_tick;
+static int snd_last_half;
+static int snd_drain_halves;
+
+static void snd_refill_half(int half)
+{
+  int16_t *dst = &snd_dbuf[half * SND_HALF_SAMPLES];
+  uint32_t half_bytes = SND_HALF_SAMPLES * 2u;
+  uint32_t copy_bytes = (snd_remaining_bytes < half_bytes) ? snd_remaining_bytes : half_bytes;
+
+  if (copy_bytes > 0) {
+    memcpy(dst, snd_src_ptr, copy_bytes);
+    snd_src_ptr += copy_bytes;
+    snd_remaining_bytes -= copy_bytes;
+
+    /* Apply the same 0-255 volume_tbl[] scale the real emulator audio path
+     * uses, so this diagnostic respects the same volume level/table. */
+    uint8_t vol = volume_tbl[audio_level];
+    if (vol != 255) {
+      uint32_t sample_count = copy_bytes / 2u;
+      for (uint32_t i = 0; i < sample_count; i++) {
+        dst[i] = (int16_t)(((int32_t)dst[i] * vol) / 255);
+      }
+    }
+  }
+  if (copy_bytes < half_bytes) {
+    memset((uint8_t *)dst + copy_bytes, 0, half_bytes - copy_bytes);
+    snd_drain_halves++;
+  }
+  SCB_CleanDCache_by_Addr((uint32_t *)dst, (half_bytes + 31u) & ~31u);
+}
+
+static void snd_poll(void)
+{
+  if (!snd_playing) {
+    return;
+  }
+
+  uint32_t elapsed_ms = HAL_GetTick() - snd_playback_start_tick;
+  int current_half = (int)((elapsed_ms / SND_HALF_DURATION_MS) % 2u);
+
+  if (current_half != snd_last_half) {
+    int refill_target = snd_last_half; /* the half that just finished playing */
+    snd_last_half = current_half;
+
+    if (snd_drain_halves >= 2) {
+      /* both halves have been silence for a full cycle -- clip is done */
+      HAL_SAI_DMAStop(&hsai_BlockA1);
+      snd_playing = 0;
+      return;
+    }
+    snd_refill_half(refill_target);
+  }
+}
+
+static void play_random_sound(void)
+{
+  static uint32_t call_counter;
+
+  if (snd_playing) {
+    return; /* don't interrupt currently-playing clip */
+  }
+
+  call_counter++;
+  uint32_t idx = (HAL_GetTick() + call_counter * 7919u) % SOUND_COUNT;
+
+  snd_src_ptr = (const uint8_t *)(0x90000000u + sound_offsets[idx]);
+  snd_remaining_bytes = sound_lengths[idx];
+  snd_playing = 1;
+  snd_drain_halves = 0;
+  snd_last_half = 0;
+
+  snd_refill_half(0);
+  snd_refill_half(1);
+
+  HAL_SAI_DMAStop(&hsai_BlockA1); /* in case a previous clip's DMA is still circularly running */
+  HAL_SAI_Transmit_DMA(&hsai_BlockA1, (uint8_t *)snd_dbuf, 2u * SND_HALF_SAMPLES);
+  snd_playback_start_tick = HAL_GetTick();
+}
+
 void wdog_enable()
 {
   MX_WWDG1_Init();
@@ -407,6 +549,14 @@ int main(void)
   log_idx = 0;
 
   /* USER CODE END 1 */
+
+  /* Self-healing option bytes: this device's option register was previously
+   * corrupted by an unrelated tool doing a full 32-bit option_write with no
+   * mask, wiping IWDG_SW/NRST_STDY/NRST_STOP/IWDG_FZ_* bits to 0. Restore
+   * the known-good value (verified against a reference unit) on every boot,
+   * but only actually write if it's already wrong -- option byte flash has
+   * far lower write endurance than regular flash. */
+  ensure_option_bytes();
 
   /* MPU Configuration--------------------------------------------------------*/
   MPU_Config();
@@ -493,6 +643,10 @@ int main(void)
      * back on. */
     lcd_backlight_on();
 
+    /* Battery/charge status: CHG pin auto-refreshes via EXTI, but PGOOD is
+     * only sampled once here -- re-poll it periodically below. */
+    bq24072_init();
+
     const uint16_t diag_colors[8] = {
       0xFFFF, /* white */
       0xFFE0, /* yellow */
@@ -504,8 +658,28 @@ int main(void)
       0x0000, /* black */
     };
     int bar_w = GW_LCD_WIDTH / 8;
-    int rotate = 0;
+    int scroll_px = 0; /* continuous per-pixel marquee offset, wraps at GW_LCD_WIDTH */
     uint32_t last_change = HAL_GetTick();
+
+    /* Button panel: bit position (per buttons_get()) -> label. Reserves the
+     * bottom strip of the screen; color bars still occupy the rest. */
+    /* TIME/GAME share one logical bit each with SELECT/START respectively
+     * (buttons_get() ORs them together at the hardware level -- there's
+     * only one bit to light for each pair, this isn't a display bug). */
+    static const char *const btn_labels[10] = {
+      "LEFT", "UP", "RIGHT", "DOWN", "A", "B", "TM/SEL", "GM/STR", "PAUSE", "POWER"
+    };
+    const int panel_y = 174;
+    const int panel_h = GW_LCD_HEIGHT - panel_y;
+    const int cols = 5;
+    const int box_w = 60, box_h = 28, gap = 4;
+
+    uint32_t prev_buttons = 0;
+
+    /* Bouncing image state (classic DVD-screensaver / Amiga demo style). */
+    int img_x = 20, img_y = 20;
+    int img_vx = 2, img_vy = 2;
+    const uint16_t *image_src = (const uint16_t *)(0x90000000u + IMAGE_OFFSET);
 
     while (1) {
       wdog_refresh();
@@ -513,21 +687,106 @@ int main(void)
       uint32_t now = HAL_GetTick();
       if (now - last_change >= 1000) {
         last_change = now;
-        rotate = (rotate + 1) % 8;
-
-        uint16_t *diag_fb = (uint16_t *)lcd_get_active_buffer();
-        for (int y = 0; y < GW_LCD_HEIGHT; y++) {
-          for (int x = 0; x < GW_LCD_WIDTH; x++) {
-            int bar = x / bar_w;
-            if (bar > 7) bar = 7;
-            diag_fb[y * GW_LCD_WIDTH + x] = diag_colors[(bar + rotate) % 8];
-          }
-        }
-        lcd_sync();
-        lcd_swap();
+        bq24072_handle_power_good();
       }
 
-      HAL_Delay(50);
+      /* Smooth scrolling marquee: advance by a couple pixels every frame
+       * instead of jumping a whole bar once a second. Pattern period is
+       * exactly GW_LCD_WIDTH (8 bars * bar_w), so it wraps seamlessly. */
+      scroll_px = (scroll_px + 2) % GW_LCD_WIDTH;
+
+      uint16_t *diag_fb = (uint16_t *)lcd_get_active_buffer();
+      for (int y = 0; y < panel_y; y++) {
+        for (int x = 0; x < GW_LCD_WIDTH; x++) {
+          int bar = ((x + scroll_px) / bar_w) % 8;
+          diag_fb[y * GW_LCD_WIDTH + x] = diag_colors[bar];
+        }
+      }
+
+      /* Advance and bounce the image within the bar area (above the button
+       * panel). */
+      img_x += img_vx;
+      img_y += img_vy;
+      if (img_x <= 0) { img_x = 0; img_vx = -img_vx; }
+      if (img_x + IMAGE_WIDTH >= GW_LCD_WIDTH) { img_x = GW_LCD_WIDTH - IMAGE_WIDTH; img_vx = -img_vx; }
+      if (img_y <= 0) { img_y = 0; img_vy = -img_vy; }
+      if (img_y + IMAGE_HEIGHT >= panel_y) { img_y = panel_y - IMAGE_HEIGHT; img_vy = -img_vy; }
+
+      for (int iy = 0; iy < IMAGE_HEIGHT; iy++) {
+        uint16_t *dst_row = &diag_fb[(img_y + iy) * GW_LCD_WIDTH + img_x];
+        const uint16_t *src_row = &image_src[iy * IMAGE_WIDTH];
+        for (int ix = 0; ix < IMAGE_WIDTH; ix++) {
+          uint16_t px = src_row[ix];
+          if (px != IMAGE_TRANSPARENT_COLOR) {
+            dst_row[ix] = px;
+          }
+        }
+      }
+
+      snd_poll();
+
+      uint32_t cur_buttons = buttons_get();
+      uint32_t newly_pressed = cur_buttons & ~prev_buttons;
+
+      /* PAUSE bit doubles as ODROID_INPUT_VOLUME (see odroid_input.c) --
+       * cycle through volume_tbl[] on each press so the level can be
+       * audibly tested via whatever sound plays right after. */
+      if (newly_pressed & (1u << 8)) {
+        audio_level = (audio_level >= ODROID_AUDIO_VOLUME_MAX) ? ODROID_AUDIO_VOLUME_MIN : (audio_level + 1);
+      }
+
+      if (newly_pressed) {
+        play_random_sound();
+      }
+      prev_buttons = cur_buttons;
+
+      odroid_overlay_draw_fill_rect(0, panel_y, GW_LCD_WIDTH, panel_h, 0x0000);
+
+      for (int i = 0; i < 10; i++) {
+        int col = i % cols;
+        int row = i / cols;
+        int x = 4 + col * (box_w + gap);
+        int y = panel_y + 2 + row * (box_h + gap);
+        int pressed = (cur_buttons >> i) & 1;
+        uint16_t box_color = pressed ? 0x07E0 /* green */ : 0x2104 /* dark gray */;
+        odroid_overlay_draw_fill_rect(x, y, box_w, box_h, box_color);
+        odroid_overlay_draw_text(x + 3, y + (box_h - 8) / 2, box_w - 6,
+                                  btn_labels[i], 0x0000, box_color);
+      }
+
+      {
+        char vol_str[12];
+        sprintf(vol_str, "VOL:%u/%u", audio_level, (unsigned)ODROID_AUDIO_VOLUME_MAX);
+        odroid_overlay_draw_text(GW_LCD_WIDTH - 88, 2, 86, vol_str, 0xFFFF, 0x0000);
+      }
+
+      {
+        odroid_battery_state_t batt = odroid_input_read_battery();
+        const char *chg_str;
+        switch (batt.state) {
+          case ODROID_BATTERY_CHARGE_STATE_BATTERY_MISSING: chg_str = "NOBAT"; break;
+          case ODROID_BATTERY_CHARGE_STATE_CHARGING:    chg_str = "CHG";   break;
+          case ODROID_BATTERY_CHARGE_STATE_DISCHARGING: chg_str = "DISC";  break;
+          case ODROID_BATTERY_CHARGE_STATE_FULL:        chg_str = "FULL";  break;
+          default:                                      chg_str = "?";     break;
+        }
+        char batt_str[16];
+        sprintf(batt_str, "%d%% %s", batt.percentage, chg_str);
+        odroid_overlay_draw_text(GW_LCD_WIDTH - 88, 12, 86, batt_str, 0xFFFF, 0x0000);
+      }
+
+      {
+        /* Set once by ensure_option_bytes() at boot -- see that function
+         * for the known-good reference value this compares against. */
+        const char *opt_str = option_bytes_were_ok ? "OPT:OK" : "OPT:FIXED";
+        uint16_t opt_color = option_bytes_were_ok ? 0x07E0 /* green */ : 0xFFE0 /* yellow */;
+        odroid_overlay_draw_text(GW_LCD_WIDTH - 88, 22, 86, opt_str, opt_color, 0x0000);
+      }
+
+      lcd_sync();
+      lcd_swap();
+
+      HAL_Delay(30);
     }
   }
 

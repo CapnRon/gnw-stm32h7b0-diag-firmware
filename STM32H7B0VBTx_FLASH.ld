@@ -349,6 +349,16 @@ SECTIONS
   }
   _OVERLAY_GW_BSS_SIZE = SIZEOF(.overlay_gw_bss);
 
+  /* Diagnostic-only scratch RAM (sound streaming buffer etc). Shares
+   * __RAM_EMU_START__ with the other overlays -- safe because this
+   * diagnostic firmware never invokes app_main()/any emulator core, so
+   * nothing else is ever live in RAM_EMU at the same time. */
+  ._diag_ram_emu __RAM_EMU_START__ (NOLOAD) : {
+    . = ALIGN(32);
+    *(.diag_ram_emu)
+    . = ALIGN(32);
+    ASSERT(ABSOLUTE(.) < __RAM_EMU_END__, "Error: diag RAM_EMU overflow");
+  } >RAM_EMU
 
   /* Place this symbol after the last overlay definition */
   .overlay_end : {
