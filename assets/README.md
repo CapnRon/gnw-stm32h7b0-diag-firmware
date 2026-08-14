@@ -27,11 +27,21 @@ from your own files with the script in this folder.
    cd ..
    make -j8 GNW_TARGET=zelda EXTFLASH_SIZE_MB=64
    ```
-6. Flash the asset blob to external flash:
+6. Flash the firmware and the asset blob. These are two separate manual
+   steps -- the build system does not tie them together yet, so run both
+   by hand, in either order:
    ```bash
+   # Firmware (internal flash bank 1)
+   gnwmanager flash --location bank1 --file build/gw_retro_go_intflash.bin
+
+   # Asset blob (external flash, offset 0)
    gnwmanager erase --location ext
    gnwmanager flash --location ext --file assets/assets.bin
    ```
+   Both commands talk to the device over SWD via an ST-Link probe, using
+   `gnwmanager`'s own OpenOCD backend. Skip the `erase` step on later runs
+   if your new `assets.bin` is the same size or smaller than what is
+   already flashed -- `gnwmanager flash` erases only the sectors it writes.
 
 ## Notes
 
