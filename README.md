@@ -49,19 +49,41 @@ design uses this so the same code works on both the Mario and Zelda models.
 
 ## Building
 
-Same build process as the upstream project. From the repo root:
+Same build process as the upstream project. See
+[Prerequisites](#prerequisites) below for the ARM GCC toolchain and Python
+dependencies. From the repo root:
 
 ```bash
-make -j8 GNW_TARGET=zelda EXTFLASH_SIZE_MB=64 flash
+make -j8 GNW_TARGET=zelda EXTFLASH_SIZE_MB=64
 ```
 
 The sound and image assets are not stored in this repo. Build your own
 asset blob from your own audio and image files with the script in
-[`assets/`](assets/README.md), then flash it with:
+[`assets/`](assets/README.md).
+
+## Flashing tools
+
+This firmware is flashed with [gnwmanager](https://github.com/BrianPugh/gnwmanager),
+not the `make flash` target the upstream project's own instructions use
+below. Install it with:
 
 ```bash
+pip install gnwmanager
+```
+
+`gnwmanager` needs a debug-probe backend. Its default backend is
+[OpenOCD](https://openocd.org/), which most package managers ship
+(`apt-get install openocd` on Debian/Ubuntu).
+
+Flash the firmware and the asset blob as two separate steps:
+
+```bash
+gnwmanager flash --location bank1 --file build/gw_retro_go_intflash.bin
 gnwmanager flash --location ext --file assets/assets.bin
 ```
+
+See [`assets/README.md`](assets/README.md) for full asset-build and flashing
+details.
 
 ## Credits
 
