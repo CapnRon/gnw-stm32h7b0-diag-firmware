@@ -95,6 +95,15 @@ See the original project for the full emulator feature set, controls, and
 build instructions. This fork strips out the emulator and ROM-loading code
 and replaces it with the diagnostic tests described above.
 
+This firmware also builds against two upstream git submodules, unmodified:
+
+- [kbeckmann/retro-go-stm32](https://github.com/kbeckmann/retro-go-stm32)
+- [bzhxx/LCD-Game-Emulator](https://github.com/bzhxx/LCD-Game-Emulator)
+
+Flashing this firmware to real hardware relies on
+[BrianPugh/gnwmanager](https://github.com/BrianPugh/gnwmanager) and
+[OpenOCD](https://openocd.org/). See [Flashing tools](#flashing-tools) above.
+
 This project is licensed under the GNU GPL v2. See [LICENSE](LICENSE).
 
 ---
