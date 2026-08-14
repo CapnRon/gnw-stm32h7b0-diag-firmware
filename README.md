@@ -55,10 +55,13 @@ Same build process as the upstream project. From the repo root:
 make -j8 GNW_TARGET=zelda EXTFLASH_SIZE_MB=64 flash
 ```
 
-The sound and image assets are not stored in this repo. They live only in
-the external flash of the physical device. Flash them separately with
-`gnwmanager flash --location ext --file <your-assets.bin>`. Build your own
-assets file from your own audio and image files.
+The sound and image assets are not stored in this repo. Build your own
+asset blob from your own audio and image files with the script in
+[`assets/`](assets/README.md), then flash it with:
+
+```bash
+gnwmanager flash --location ext --file assets/assets.bin
+```
 
 ## Credits
 

@@ -33,3 +33,10 @@ venv
 
 **/*.pyc
 
+# Sound/image asset content is never committed -- only the generator script
+# and its README are tracked. See assets/README.md.
+assets/src/
+assets/*.bin
+assets/*.pcm
+assets/*.rgb565
+
