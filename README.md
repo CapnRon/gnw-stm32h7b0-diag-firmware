@@ -21,6 +21,7 @@ Use this firmware to check these things after a repair:
 - The watchdog and option bytes stay correct across reboots.
 - The speaker and volume control work.
 - The battery and charge-status sensor work.
+- STANDBY mode and the power-button wakeup path work.
 
 ## What the firmware shows on screen
 
@@ -40,6 +41,12 @@ Use this firmware to check these things after a repair:
 Press any button to play a short sound effect. The firmware picks one at
 random from a small built-in set. This checks the SAI audio peripheral and
 speaker.
+
+## Power off
+
+Hold **POWER** for 5 seconds to power off the device. This checks that
+STANDBY mode and the power-button wakeup path both work. Press **POWER**
+again to turn the device back on.
 
 ## Known hardware note
 
