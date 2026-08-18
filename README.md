@@ -52,6 +52,38 @@ and [`Core/Src/gw_ram_test.c`](Core/Src/gw_ram_test.c) for the test itself.
 This branch needs only the internal-flash image; there is no asset blob to
 build or flash (see [Flashing tools](#flashing-tools) below).
 
+### Why the PSRAM is never mapped at 0x90000000
+
+`0x90000000` is the STM32H7's OCTOSPI1 memory-mapped window. Once the OSPI
+peripheral is configured for it, the external chip appears as flat,
+directly-readable memory at that address -- `*(uint8_t*)(0x90000000 +
+offset)` works, and the OSPI controller transparently issues the right SPI
+command underneath. This is how the *original* NOR-flash firmware works:
+the linker script sets `__EXTFLASH_BASE__ = 0x90000000`, and game ROM data,
+the emulator overlay code, and save states are all addressed as if they
+were just sitting in memory at `0x90000000 + offset`. That's safe for NOR
+flash, which reads linearly with no surprises.
+
+It is not safe for this PSRAM. The IS66WVS4M8 datasheet is explicit that
+reads and writes are "always wrapped within page": every transaction
+silently wraps back to the start of its current 1024-byte page instead of
+continuing into the next one. If memory-mapped mode were enabled the usual
+way, the CPU's cache and AXI bus would do what they always do -- burst-read
+chunks larger than 1024 bytes, or reads that straddle a 1024-byte boundary,
+whenever it feels like it -- and the PSRAM would silently hand back
+wrapped-around garbage for any burst crossing a page boundary. No error,
+just wrong data.
+
+So [`gw_psram_test.c`](Core/Src/gw_psram_test.c) never calls
+`HAL_OSPI_MemoryMapped()`. Every access goes through `PSRAM_Read()` /
+`PSRAM_Write()`, which issue individual, explicit SPI commands and manually
+chunk every transfer so no single command ever crosses a 1024-byte
+boundary. The addresses passed to those functions (`0x000000` through
+`0x3FFFFF`, the chip's 4MB range) aren't CPU pointers -- they're the 24-bit
+address field baked into each SPI command, telling the PSRAM chip which of
+its internal bytes to read or write. There is no `*(ptr)` access to PSRAM
+anywhere in this firmware; it's all indirect, command-by-command.
+
 ## Power off
 
 Hold **POWER** for 5 seconds to power off the device. This checks that
