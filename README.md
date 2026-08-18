@@ -17,30 +17,40 @@ not match a known-good reference value, it corrects them.
 Use this firmware to check these things after a repair:
 
 - The LCD panel and backlight work.
-- Every button reports its correct state.
 - The watchdog and option bytes stay correct across reboots.
-- The speaker and volume control work.
 - The battery and charge-status sensor work.
 - STANDBY mode and the power-button wakeup path work.
+- Every internal SRAM region and the full external OSPI chip hold data
+  correctly.
 
-## What the firmware shows on screen
+## `ram-test` branch
 
-- A smooth scrolling color-bar pattern fills most of the screen.
-- A status panel at the bottom shows all ten buttons. A button lights up
-  green when you press it.
-- A status readout in the top-right corner shows:
-  - Volume level (0-9). Press **PAUSE** to cycle through volume levels.
-  - Battery percentage and charge state.
-  - Option-byte status. `OPT:OK` means the option bytes were already correct.
-    `OPT:FIXED` means the firmware corrected them on this boot.
-- A bouncing image moves around the color-bar area, like an old Amiga demo.
-  Use this to check the LCD refresh and framebuffer at a glance.
+This branch swaps the usual color-bar/sound/bouncing-image demo for a RAM
+test screen. It exists because the external OSPI flash footprint on this
+board was reworked to hold an
+[ISSI IS66WVS4M8FALL/BLL](https://www.issi.com) 32Mbit (4MB) Serial/QPI
+PSRAM instead of NOR flash, and this branch verifies that swap.
 
-## Sound test
+On boot it runs an address-uniqueness pass and a 0x55/0xAA checkerboard
+pass over every internal SRAM region this build doesn't otherwise use
+(DTCM heap, the free tail of AXI RAM_CORE, all of AXI RAM_EMU, and the
+free tail of AHB SRAM1/2), plus a full read/write/verify pass over the
+entire external PSRAM. Results are shown on screen and printed to the
+`logbuf` UART/log ring (see [`scripts/dump_logs.sh`](scripts/dump_logs.sh)),
+one PASS/FAIL line per region plus the exact failing address/expected/
+actual value if a region fails.
 
-Press any button to play a short sound effect. The firmware picks one at
-random from a small built-in set. This checks the SAI audio peripheral and
-speaker.
+Sound playback and the bouncing-image demo are disabled on this branch --
+both depended on the asset blob that used to live in that external flash
+slot, which no longer applies now that the slot holds PSRAM. The button
+panel and volume readout are also removed; POWER-hold-to-shutdown still
+works. See [`Core/Src/gw_psram_test.c`](Core/Src/gw_psram_test.c) for the
+PSRAM driver (indirect SPI commands only -- this chip wraps reads/writes
+at 1024-byte page boundaries, so it is deliberately never memory-mapped)
+and [`Core/Src/gw_ram_test.c`](Core/Src/gw_ram_test.c) for the test itself.
+
+This branch needs only the internal-flash image; there is no asset blob to
+build or flash (see [Flashing tools](#flashing-tools) below).
 
 ## Power off
 
@@ -53,6 +63,9 @@ again to turn the device back on.
 Some buttons share one logical input. `TIME` and `SELECT` share one bit.
 `GAME` and `START` share one bit. This is normal. The original firmware
 design uses this so the same code works on both the Mario and Zelda models.
+This branch doesn't display per-button state on screen (see
+[`ram-test` branch](#ram-test-branch) above), but the shared-bit behavior
+still applies if you read `buttons_get()` yourself.
 
 ## Building
 
@@ -82,15 +95,28 @@ pip install gnwmanager
 [OpenOCD](https://openocd.org/), which most package managers ship
 (`apt-get install openocd` on Debian/Ubuntu).
 
-Flash the firmware and the asset blob as two separate steps:
+On this branch, only the internal-flash image needs flashing -- there is no
+asset blob:
 
 ```bash
 gnwmanager flash --location bank1 --file build/gw_retro_go_intflash.bin
-gnwmanager flash --location ext --file assets/assets.bin
+```
+
+**On a board with the PSRAM swap**, `gnwmanager` will refuse to run any
+command, including the one above, with `Failed to communicate with external
+flash chip. Check your soldering!` -- this is a false alarm. `gnwmanager`
+unconditionally probes the external chip's JEDEC ID as part of connecting,
+and PSRAM returns a different ID format than the NOR flash it expects, which
+it doesn't recognize. It's not a soldering problem. Flash straight through
+OpenOCD instead, which only touches internal flash and never probes the
+external chip:
+
+```bash
+make flash_intflash
 ```
 
 See [`assets/README.md`](assets/README.md) for full asset-build and flashing
-details.
+details (not applicable to this branch, but relevant on `main`).
 
 ## Credits
 
