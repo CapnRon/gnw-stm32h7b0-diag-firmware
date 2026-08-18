@@ -19,6 +19,8 @@ Core/Src/bilinear.c \
 Core/Src/gw_buttons.c \
 Core/Src/gw_flash.c \
 Core/Src/gw_lcd.c \
+Core/Src/gw_psram_test.c \
+Core/Src/gw_ram_test.c \
 Core/Src/main.c \
 Core/Src/sha256.c \
 Core/Src/flashapp.c \

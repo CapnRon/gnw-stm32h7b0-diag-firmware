@@ -29,16 +29,13 @@
 #include "gw_linker.h"
 #include "githash.h"
 #include "flashapp.h"
+#include "gw_psram_test.h"
+#include "gw_ram_test.h"
 
 #include "odroid_colors.h"
 #include "odroid_system.h"
 #include "odroid_overlay.h"
 #include "bq24072.h"
-#include "sound_assets.h"
-#include "porting/common.h" /* volume_tbl[], ODROID_AUDIO_VOLUME_MAX/MIN */
-
-/* audio_level lives in odroid_audio.c but isn't declared in a header. */
-extern uint8_t audio_level;
 
 #include <string.h>
 #include <assert.h>
@@ -373,6 +370,8 @@ static void ensure_option_bytes(void)
   }
 }
 
+#if 0 /* Disabled: external chip is now PSRAM, not the NOR flash asset blob
+       * this sound test streamed from. RAM test build only for now. */
 /* --- Diagnostic sound playback: gapless double-buffered SAI/DMA streaming -
  * hdma_sai1_a is configured DMA_CIRCULAR (needed for the real emulator's
  * gapless audio streaming). We exploit that directly instead of fighting
@@ -475,6 +474,7 @@ static void play_random_sound(void)
   HAL_SAI_Transmit_DMA(&hsai_BlockA1, (uint8_t *)snd_dbuf, 2u * SND_HALF_SAMPLES);
   snd_playback_start_tick = HAL_GetTick();
 }
+#endif /* sound playback disabled */
 
 void wdog_enable()
 {
@@ -634,7 +634,7 @@ int main(void)
   SCB_EnableICache();
   SCB_EnableDCache();
 
-  OSPI_Init(&hospi1);
+  PSRAM_Init(&hospi1);
 
   {
 
@@ -647,40 +647,11 @@ int main(void)
      * only sampled once here -- re-poll it periodically below. */
     bq24072_init();
 
-    const uint16_t diag_colors[8] = {
-      0xFFFF, /* white */
-      0xFFE0, /* yellow */
-      0x07FF, /* cyan */
-      0x07E0, /* green */
-      0xF81F, /* magenta */
-      0xF800, /* red */
-      0x001F, /* blue */
-      0x0000, /* black */
-    };
-    int bar_w = GW_LCD_WIDTH / 8;
-    int scroll_px = 0; /* continuous per-pixel marquee offset, wraps at GW_LCD_WIDTH */
+    RamTest_RunAll();
+
     uint32_t last_change = HAL_GetTick();
-
-    /* Button panel: bit position (per buttons_get()) -> label. Reserves the
-     * bottom strip of the screen; color bars still occupy the rest. */
-    /* TIME/GAME share one logical bit each with SELECT/START respectively
-     * (buttons_get() ORs them together at the hardware level -- there's
-     * only one bit to light for each pair, this isn't a display bug). */
-    static const char *const btn_labels[10] = {
-      "LEFT", "UP", "RIGHT", "DOWN", "A", "B", "TM/SEL", "GM/STR", "PAUSE", "POWER"
-    };
-    const int panel_y = 174;
-    const int panel_h = GW_LCD_HEIGHT - panel_y;
-    const int cols = 5;
-    const int box_w = 60, box_h = 28, gap = 4;
-
     uint32_t prev_buttons = 0;
     uint32_t power_hold_start = 0;
-
-    /* Bouncing image state (classic DVD-screensaver / Amiga demo style). */
-    int img_x = 20, img_y = 20;
-    int img_vx = 2, img_vy = 2;
-    const uint16_t *image_src = (const uint16_t *)(0x90000000u + IMAGE_OFFSET);
 
     while (1) {
       wdog_refresh();
@@ -691,50 +662,8 @@ int main(void)
         bq24072_handle_power_good();
       }
 
-      /* Smooth scrolling marquee: advance by a couple pixels every frame
-       * instead of jumping a whole bar once a second. Pattern period is
-       * exactly GW_LCD_WIDTH (8 bars * bar_w), so it wraps seamlessly. */
-      scroll_px = (scroll_px + 2) % GW_LCD_WIDTH;
-
-      uint16_t *diag_fb = (uint16_t *)lcd_get_active_buffer();
-      for (int y = 0; y < panel_y; y++) {
-        for (int x = 0; x < GW_LCD_WIDTH; x++) {
-          int bar = ((x + scroll_px) / bar_w) % 8;
-          diag_fb[y * GW_LCD_WIDTH + x] = diag_colors[bar];
-        }
-      }
-
-      /* Advance and bounce the image within the bar area (above the button
-       * panel). */
-      img_x += img_vx;
-      img_y += img_vy;
-      if (img_x <= 0) { img_x = 0; img_vx = -img_vx; }
-      if (img_x + IMAGE_WIDTH >= GW_LCD_WIDTH) { img_x = GW_LCD_WIDTH - IMAGE_WIDTH; img_vx = -img_vx; }
-      if (img_y <= 0) { img_y = 0; img_vy = -img_vy; }
-      if (img_y + IMAGE_HEIGHT >= panel_y) { img_y = panel_y - IMAGE_HEIGHT; img_vy = -img_vy; }
-
-      for (int iy = 0; iy < IMAGE_HEIGHT; iy++) {
-        uint16_t *dst_row = &diag_fb[(img_y + iy) * GW_LCD_WIDTH + img_x];
-        const uint16_t *src_row = &image_src[iy * IMAGE_WIDTH];
-        for (int ix = 0; ix < IMAGE_WIDTH; ix++) {
-          uint16_t px = src_row[ix];
-          if (px != IMAGE_TRANSPARENT_COLOR) {
-            dst_row[ix] = px;
-          }
-        }
-      }
-
-      snd_poll();
-
       uint32_t cur_buttons = buttons_get();
       uint32_t newly_pressed = cur_buttons & ~prev_buttons;
-
-      /* PAUSE bit doubles as ODROID_INPUT_VOLUME (see odroid_input.c) --
-       * cycle through volume_tbl[] on each press so the level can be
-       * audibly tested via whatever sound plays right after. */
-      if (newly_pressed & (1u << 8)) {
-        audio_level = (audio_level >= ODROID_AUDIO_VOLUME_MAX) ? ODROID_AUDIO_VOLUME_MIN : (audio_level + 1);
-      }
 
       /* Hold POWER (bit9) for 5 seconds to power off. GW_EnterDeepSleep()
        * (main.c) is self-contained -- unlike odroid_system_sleep(), it does
@@ -747,31 +676,11 @@ int main(void)
       if ((cur_buttons & (1u << 9)) && (now - power_hold_start >= 5000)) {
         GW_EnterDeepSleep();
       }
-
-      if (newly_pressed) {
-        play_random_sound();
-      }
       prev_buttons = cur_buttons;
 
-      odroid_overlay_draw_fill_rect(0, panel_y, GW_LCD_WIDTH, panel_h, 0x0000);
-
-      for (int i = 0; i < 10; i++) {
-        int col = i % cols;
-        int row = i / cols;
-        int x = 4 + col * (box_w + gap);
-        int y = panel_y + 2 + row * (box_h + gap);
-        int pressed = (cur_buttons >> i) & 1;
-        uint16_t box_color = pressed ? 0x07E0 /* green */ : 0x2104 /* dark gray */;
-        odroid_overlay_draw_fill_rect(x, y, box_w, box_h, box_color);
-        odroid_overlay_draw_text(x + 3, y + (box_h - 8) / 2, box_w - 6,
-                                  btn_labels[i], 0x0000, box_color);
-      }
-
-      {
-        char vol_str[12];
-        sprintf(vol_str, "VOL:%u/%u", audio_level, (unsigned)ODROID_AUDIO_VOLUME_MAX);
-        odroid_overlay_draw_text(GW_LCD_WIDTH - 88, 2, 86, vol_str, 0xFFFF, 0x0000);
-      }
+      odroid_overlay_draw_fill_rect(0, 0, GW_LCD_WIDTH, GW_LCD_HEIGHT, 0x0000);
+      odroid_overlay_draw_text(4, 2, GW_LCD_WIDTH - 8, "RAM TEST", 0xFFFF, 0x0000);
+      RamTest_DrawReport(4, 20, GW_LCD_WIDTH - 8);
 
       {
         odroid_battery_state_t batt = odroid_input_read_battery();
@@ -785,7 +694,7 @@ int main(void)
         }
         char batt_str[16];
         sprintf(batt_str, "%d%% %s", batt.percentage, chg_str);
-        odroid_overlay_draw_text(GW_LCD_WIDTH - 88, 12, 86, batt_str, 0xFFFF, 0x0000);
+        odroid_overlay_draw_text(GW_LCD_WIDTH - 88, GW_LCD_HEIGHT - 10, 86, batt_str, 0xFFFF, 0x0000);
       }
 
       {
@@ -793,7 +702,7 @@ int main(void)
          * for the known-good reference value this compares against. */
         const char *opt_str = option_bytes_were_ok ? "OPT:OK" : "OPT:FIXED";
         uint16_t opt_color = option_bytes_were_ok ? 0x07E0 /* green */ : 0xFFE0 /* yellow */;
-        odroid_overlay_draw_text(GW_LCD_WIDTH - 88, 22, 86, opt_str, opt_color, 0x0000);
+        odroid_overlay_draw_text(4, GW_LCD_HEIGHT - 10, 86, opt_str, opt_color, 0x0000);
       }
 
       lcd_sync();
