@@ -1,4 +1,5 @@
 #include "gw_psram_test.h"
+#include "gw_ospi_bus.h"
 #include "main.h"
 
 #include <string.h>
@@ -37,26 +38,39 @@ static void psram_cmd(uint8_t instr, uint32_t addr, bool has_addr, uint8_t dummy
 
     wdog_refresh();
 
+    /* PSRAM CS is PE9, not the OSPI peripheral's own hardware NCS (that's
+     * still wired to the NOR flash, unchanged). Detach NOR from the bus and
+     * select PSRAM for the full command+data phase, then hand the bus back
+     * -- see gw_ospi_bus.h for why. */
+    OspiBus_SelectPsram();
+
     if (HAL_OSPI_Command(s_hospi, &c, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+        OspiBus_DeselectPsram();
         Error_Handler();
     }
 
     if (len > 0) {
         if (is_write) {
             if (HAL_OSPI_Transmit(s_hospi, data, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+                OspiBus_DeselectPsram();
                 Error_Handler();
             }
         } else {
             if (HAL_OSPI_Receive(s_hospi, data, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+                OspiBus_DeselectPsram();
                 Error_Handler();
             }
         }
     }
+
+    OspiBus_DeselectPsram();
 }
 
 void PSRAM_Init(OSPI_HandleTypeDef *hospi)
 {
     s_hospi = hospi;
+
+    OspiBus_Init(hospi);
 
     /* Software reset (RESET ENABLE then RESET, datasheet 5.8). Device also
      * powers up in SPI standby already, this just guarantees a known state

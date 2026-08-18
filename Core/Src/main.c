@@ -30,6 +30,7 @@
 #include "githash.h"
 #include "flashapp.h"
 #include "gw_psram_test.h"
+#include "gw_nor_test.h"
 #include "gw_ram_test.h"
 
 #include "odroid_colors.h"
@@ -635,6 +636,7 @@ int main(void)
   SCB_EnableDCache();
 
   PSRAM_Init(&hospi1);
+  NorTest_Init(&hospi1);
 
   {
 

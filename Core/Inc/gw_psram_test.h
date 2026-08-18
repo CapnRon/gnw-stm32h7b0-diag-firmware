@@ -7,13 +7,17 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Driver for the IS66WVS4M8FALL/BLL 32Mbit (4MByte) Serial/QPI PSRAM now
- * populated in the external-flash OSPI slot. This is volatile self-refresh
- * PSRAM, not NOR flash: no erase, no status/WIP polling, no write-enable.
- * Talks SPI (1-1-1) only, via indirect (non-memory-mapped) OSPI commands --
- * memory-mapped XIP is intentionally not used here, since this chip always
- * wraps reads/writes at 1024-byte page boundaries (datasheet 4.2), which
- * would silently corrupt a linear memory-mapped burst that crosses a page. */
+/* Driver for an IS66WVS4M8FALL/BLL 32Mbit (4MByte) Serial/QPI PSRAM
+ * piggybacked onto the same OSPI CLK/SIO lines as the board's original NOR
+ * flash, which stays in its original position on its original CE#. The
+ * PSRAM's own CS is wired separately to PE9 (see gw_ospi_bus.h for how the
+ * two chip-selects are arbitrated so a PSRAM command can't also select the
+ * NOR flash). This is volatile self-refresh PSRAM, not NOR flash: no
+ * erase, no status/WIP polling, no write-enable. Talks SPI (1-1-1) only,
+ * via indirect (non-memory-mapped) OSPI commands -- memory-mapped XIP is
+ * intentionally not used here, since this chip always wraps reads/writes
+ * at 1024-byte page boundaries (datasheet 4.2), which would silently
+ * corrupt a linear memory-mapped burst that crosses a page. */
 
 #define PSRAM_SIZE_BYTES  (4u * 1024u * 1024u)
 #define PSRAM_PAGE_BYTES  1024u

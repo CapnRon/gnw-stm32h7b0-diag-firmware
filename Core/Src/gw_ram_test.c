@@ -1,5 +1,6 @@
 #include "gw_ram_test.h"
 #include "gw_psram_test.h"
+#include "gw_nor_test.h"
 #include "gw_linker.h"
 #include "gw_lcd.h"
 #include "main.h"
@@ -18,6 +19,9 @@ extern uint32_t __ram_end__;
 #define AHBRAM_END_ADDR (0x30000000u + 128u * 1024u)
 
 #define RAM_TEST_MAX_REGIONS 8
+
+static char s_nor_detail_buf[48];
+static char s_nor_id_buf[24];
 
 static ram_test_result_t s_results[RAM_TEST_MAX_REGIONS];
 static int s_result_count;
@@ -140,6 +144,7 @@ void RamTest_RunAll(void)
 
     for (unsigned i = 0; i < ARRAY_SIZE(internal); i++) {
         ram_test_result_t *r = &s_results[s_result_count++];
+        memset(r, 0, sizeof(*r));
         r->name = internal[i].name;
         r->start = internal[i].start;
         r->size = internal[i].end - internal[i].start;
@@ -155,7 +160,8 @@ void RamTest_RunAll(void)
 
     {
         ram_test_result_t *r = &s_results[s_result_count++];
-        r->name = "OSPI PSRAM (IS66WVS4M8)";
+        memset(r, 0, sizeof(*r));
+        r->name = "OSPI PSRAM (IS66WVS4M8, CS=PE9)";
         r->start = 0;
         r->size = PSRAM_SIZE_BYTES;
 
@@ -174,6 +180,49 @@ void RamTest_RunAll(void)
 
         printf("  -> %s\n", r->pass ? "PASS" : "FAIL");
     }
+
+    {
+        /* Piggybacked NOR flash, original CE# (PE11 / hardware NCS,
+         * unchanged from stock). Deliberately read-only -- see
+         * gw_nor_test.h. size stays 0 so this entry isn't counted into the
+         * "Total tested" byte count below: presence + a small read-
+         * consistency check verify the chip and bus wiring, not its full
+         * capacity. */
+        ram_test_result_t *r = &s_results[s_result_count++];
+        memset(r, 0, sizeof(*r));
+        r->name = "NOR flash (piggybacked, CS=PE11)";
+        r->start = 0;
+        r->size = 0;
+
+        uint8_t id[3];
+        const char *part_name;
+        bool known = NorTest_ReadID(id, &part_name);
+        bool present = !((id[0] == 0x00 && id[1] == 0x00 && id[2] == 0x00) ||
+                          (id[0] == 0xFF && id[1] == 0xFF && id[2] == 0xFF));
+
+        printf("NOR ID: %02x %02x %02x (%s)\n", id[0], id[1], id[2],
+               known ? part_name : (present ? "unknown part" : "no response"));
+
+        if (!present) {
+            r->pass = false;
+            snprintf(s_nor_detail_buf, sizeof(s_nor_detail_buf), "no response (00/FF)");
+        } else {
+            bool consistent = NorTest_ReadConsistency(0, 64);
+            r->pass = consistent;
+
+            if (known) {
+                snprintf(s_nor_id_buf, sizeof(s_nor_id_buf), "%s", part_name);
+            } else {
+                snprintf(s_nor_id_buf, sizeof(s_nor_id_buf), "ID %02X %02X %02X (unknown)",
+                         id[0], id[1], id[2]);
+            }
+            snprintf(s_nor_detail_buf, sizeof(s_nor_detail_buf), "%s%s",
+                     s_nor_id_buf, consistent ? "" : " - read unstable");
+        }
+        r->detail = s_nor_detail_buf;
+
+        printf("  -> %s\n", r->pass ? "PASS" : "FAIL");
+    }
 }
 
 void RamTest_DrawReport(int x, int y, int width)
@@ -186,13 +235,20 @@ void RamTest_DrawReport(int x, int y, int width)
         ram_test_result_t *r = &s_results[i];
         uint16_t color = r->pass ? 0x07E0 : 0xF800;
 
-        total_bytes += r->size;
-
-        snprintf(buf, sizeof(buf), "%-22s %6lu KB %s",
-                 r->name, (unsigned long)(r->size / 1024u), r->pass ? "PASS" : "FAIL");
+        if (r->size > 0) {
+            total_bytes += r->size;
+            snprintf(buf, sizeof(buf), "%-22s %6lu KB %s",
+                     r->name, (unsigned long)(r->size / 1024u), r->pass ? "PASS" : "FAIL");
+        } else {
+            snprintf(buf, sizeof(buf), "%-22s %s",
+                     r->name, r->pass ? "PASS" : "FAIL");
+        }
         line_y += odroid_overlay_draw_text(x, line_y, width, buf, color, 0x0000);
 
-        if (!r->pass) {
+        if (r->detail) {
+            snprintf(buf, sizeof(buf), "  %s", r->detail);
+            line_y += odroid_overlay_draw_text(x, line_y, width, buf, 0xFFE0, 0x0000);
+        } else if (!r->pass) {
             snprintf(buf, sizeof(buf), "  @0x%08lx exp=0x%08lx got=0x%08lx",
                      (unsigned long)r->first_fail_addr,
                      (unsigned long)r->first_fail_expected,
