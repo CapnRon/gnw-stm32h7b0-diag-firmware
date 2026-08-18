@@ -7,6 +7,39 @@ same firmware should also work on the Mario edition (STM32H7A3). Use it to
 check hardware health after a repair. It is a fork of
 [kbeckmann/game-and-watch-retro-go](https://github.com/kbeckmann/game-and-watch-retro-go).
 
+## PSRAM chip-select auto-detection (`ram-test` branch)
+
+The `ram-test` branch adds a PSRAM/NOR diagnostic suite. The PSRAM
+(ISSI IS66WVS4M8FALL, 4MB) can be wired with its CE# on one of three pins
+depending on the hardware revision, and the firmware detects it
+automatically at boot:
+
+1. **PE11** - the OCTOSPI hardware NCS pin (AF11). No GPIO work needed.
+2. **PC11** - alternate location of the same NCS signal (AF9).
+3. **PE9**  - plain GPIO output (the original NOR-sharing piggyback wiring).
+
+`OspiBus_ProbePsram()` issues a Read-ID (9Fh) on each candidate and latches
+the first one that answers MF=0x9D / KGD=0x5D. The test log prints the
+detected pin, e.g. `PSRAM CS: PE11 (OSPI NCS)`. The RAM test then runs the
+full read/write verification (two pattern passes) over the 4MB PSRAM, plus
+all four internal SRAM regions, and reports the NOR JEDEC ID (absent when
+the NOR has been removed).
+
+### Flashing (patched OpenOCD)
+
+The G&W's STM32H7B0 exposes an undocumented 256KB bank; flashing requires
+the patched OpenOCD build. See the `psram-only` branch of
+[CapnRon/game-and-watch-retro-go-sd](https://github.com/CapnRon/game-and-watch-retro-go-sd)
+for the full procedure; this repo's `scripts/interface_stlink.cfg` uses
+`set DUAL_BANK 0` (256KB bank at 0x08000000).
+
+### Companion repos
+
+- **Firmware**: [CapnRon/game-and-watch-retro-go-sd](https://github.com/CapnRon/game-and-watch-retro-go-sd)
+  branch `psram-only` - Retro-Go SD running fully on the PSRAM (no NOR).
+- **Flasher**: [CapnRon/gnwmanager](https://github.com/CapnRon/gnwmanager)
+  branch `psram-only` - PSRAM-tolerant gnwmanager bootloader.
+
 ## Why this firmware exists
 
 A previous tool corrupted the STM32H7B0 option bytes on this board. The
