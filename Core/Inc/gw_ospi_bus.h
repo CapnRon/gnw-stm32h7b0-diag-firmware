@@ -3,36 +3,39 @@
 
 #include "stm32h7xx_hal.h"
 
-/* CS arbitration for two chips sharing one OSPI bus (CLK + 4 SIO lines) but
- * with two separate, non-bridged chip-selects:
+/* PSRAM chip-select auto-detection.
  *
- *   - NOR flash: original position, original CE#, wired to the OSPI
- *     peripheral's own hardware NCS pin (PE11 / OCTOSPIM_P1_NCS, external
- *     pull-up). HAL_OSPI_MspInit() already configures PE11 as AF11 so the
- *     peripheral drives it automatically for every transaction.
- *   - PSRAM: piggybacked onto the same CLK/SIO lines, CS wired to PE9
- *     (plain GPIO, not connected to the OSPI peripheral at all).
+ * The PSRAM (ISSI IS66WVS4M8FALL) can be wired with its CE# on one of three
+ * pins, depending on which hardware revision it is mounted on:
  *
- * The OSPI peripheral asserts its hardware NCS pin (PE11) for the full
- * duration of *every* command it issues, with no per-call way to suppress
- * it. Left alone, a PSRAM-targeted command (address on PE9) would also
- * select the NOR flash via PE11 at the same time -- since several PSRAM
- * opcodes (0x02 write, 0x0B read) are also valid NOR opcodes, that's not
- * just contention on the shared SIO lines, it's a real risk of writing to
- * or reading back the wrong chip.
+ *   - PE11: the OSPI peripheral's own hardware NCS (AF11). The peripheral
+ *     drives it automatically for every transaction; no GPIO work needed.
+ *   - PC11: alternate location of the same hardware NCS (AF9). Same
+ *     behaviour, different pin (PE11 is then left as a pulled-up input).
+ *   - PE9:  a plain GPIO output (the original piggyback wiring, when the
+ *     NOR was still sharing the bus).
  *
- * Fix: for the duration of a PSRAM transaction, detach PE11 from the OSPI
- * peripheral (switch it to a plain GPIO input) so the physical net floats
- * and is held HIGH by its external pull-up -- deselecting NOR regardless
- * of what the peripheral's internal NCS state machine is doing -- then
- * drive PE9 low. Restore PE11 to AF11/OCTOSPIM_P1_NCS afterward so the
- * peripheral resumes automatic NCS control for NOR transactions. */
+ * OspiBus_ProbePsram() tries each candidate in that order, issues a Read-ID
+ * (9Fh) and checks for MF=0x9D / KGD=0x5D. The first match is latched and
+ * used for every subsequent Select/Deselect bracket. */
+
+typedef enum {
+    OSPI_BUS_PSRAM_CS_UNKNOWN = 0,
+    OSPI_BUS_PSRAM_CS_PE11,   /* hardware OSPI NCS (AF11) */
+    OSPI_BUS_PSRAM_CS_PC11,   /* hardware OSPI NCS alternate (AF9) */
+    OSPI_BUS_PSRAM_CS_PE9,    /* plain GPIO output */
+} ospi_bus_psram_cs_t;
 
 void OspiBus_Init(OSPI_HandleTypeDef *hospi);
 
-/* Bracket every PSRAM command with these two calls. Safe to nest by
- * accident (not reentrant/nestable on purpose, but each call pair is a
- * complete detach/reattach cycle). */
+/* Probe all three CS candidates and latch the first one that answers with a
+ * valid PSRAM ID. Returns the latched mode (UNKNOWN if nothing matched). */
+ospi_bus_psram_cs_t OspiBus_ProbePsram(void);
+
+ospi_bus_psram_cs_t OspiBus_GetPsramCs(void);
+
+/* Bracket every PSRAM command with these two calls. No-ops for the
+ * hardware-NCS modes; GPIO toggle only for the PE9 mode. */
 void OspiBus_SelectPsram(void);
 void OspiBus_DeselectPsram(void);
 

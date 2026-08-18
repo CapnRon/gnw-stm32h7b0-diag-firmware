@@ -111,6 +111,22 @@ log was requested** -- next step is to read the log buffer and confirm
 both NOR (expect real 64MB part ID + consistent reads) and PSRAM (expect
 same PASS as before) report correctly with the CS arbitration in place.
 
+### Verification complete (log buffer captured via `gnwmanager monitor`)
+
+All green with the CS arbitration in place:
+
+- DTCM Heap / AXI RAM_CORE / AXI RAM_EMU / AHB SRAM1+2: all PASS
+- PSRAM ID: MF=0x9d KGD=0x5d (PASS) -- genuine ISSI, same as before
+- PSRAM pass 1/2 (address uniqueness) and 2/2 (0x55/0xAA): PASS
+- **NOR ID: `c2 25 3a` = MX25U51245G (Macronix 64MB), read-twice check PASS**
+
+So the PE11-detach / PE9-select arbitration brackets PSRAM transactions
+correctly: PSRAM commands no longer disturb NOR, and both parts answer on
+the shared OSPI bus. Note: `make dump_logs` fails in this environment
+(`arm-none-eabi-gdb` not installed) -- `gnwmanager monitor --elf
+build/gw_retro_go.elf` is the drop-in replacement and prints the same
+logbuf live.
+
 ### Files changed (branch `ram-test`)
 
 - `Core/Inc/gw_ospi_bus.h`, `Core/Src/gw_ospi_bus.c` -- new, CS arbitration

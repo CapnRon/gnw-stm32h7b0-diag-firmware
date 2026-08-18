@@ -2,6 +2,7 @@
 #include "gw_ospi_bus.h"
 #include "main.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* IS66WVS4M8FALL/BLL command set (datasheet Table 4.1), SPI mode (1-1-1) only. */
@@ -38,10 +39,8 @@ static void psram_cmd(uint8_t instr, uint32_t addr, bool has_addr, uint8_t dummy
 
     wdog_refresh();
 
-    /* PSRAM CS is PE9, not the OSPI peripheral's own hardware NCS (that's
-     * still wired to the NOR flash, unchanged). Detach NOR from the bus and
-     * select PSRAM for the full command+data phase, then hand the bus back
-     * -- see gw_ospi_bus.h for why. */
+    /* CS bracket is mode-aware: no-op for the hardware-NCS pins (PE11/PC11),
+     * GPIO toggle for PE9. */
     OspiBus_SelectPsram();
 
     if (HAL_OSPI_Command(s_hospi, &c, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
@@ -71,6 +70,24 @@ void PSRAM_Init(OSPI_HandleTypeDef *hospi)
     s_hospi = hospi;
 
     OspiBus_Init(hospi);
+
+    /* Auto-detect which pin carries the PSRAM's CE#: PE11 (hardware OSPI
+     * NCS), PC11 (alternate NCS location) or PE9 (plain GPIO). */
+    ospi_bus_psram_cs_t cs = OspiBus_ProbePsram();
+    switch (cs) {
+    case OSPI_BUS_PSRAM_CS_PE11:
+        printf("PSRAM CS: PE11 (OSPI NCS)\n");
+        break;
+    case OSPI_BUS_PSRAM_CS_PC11:
+        printf("PSRAM CS: PC11 (OSPI NCS alt)\n");
+        break;
+    case OSPI_BUS_PSRAM_CS_PE9:
+        printf("PSRAM CS: PE9 (GPIO)\n");
+        break;
+    default:
+        printf("PSRAM CS: NOT FOUND (tried PE11, PC11, PE9)\n");
+        return;
+    }
 
     /* Software reset (RESET ENABLE then RESET, datasheet 5.8). Device also
      * powers up in SPI standby already, this just guarantees a known state
