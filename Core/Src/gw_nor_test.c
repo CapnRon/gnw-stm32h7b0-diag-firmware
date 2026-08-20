@@ -115,3 +115,18 @@ bool NorTest_ReadConsistency(uint32_t address, uint8_t len)
 
     return memcmp(a, b, len) == 0;
 }
+
+#define NOR_READ_CHUNK 4096u
+
+void NorTest_Read(uint32_t address, uint8_t *data, size_t len)
+{
+    while (len > 0) {
+        uint32_t n = (len < NOR_READ_CHUNK) ? (uint32_t)len : NOR_READ_CHUNK;
+
+        nor_cmd(NOR_CMD_READ, address, true, 0, data, n);
+
+        address += n;
+        data += n;
+        len -= n;
+    }
+}

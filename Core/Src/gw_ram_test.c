@@ -26,6 +26,25 @@ static char s_nor_id_buf[24];
 static ram_test_result_t s_results[RAM_TEST_MAX_REGIONS];
 static int s_result_count;
 
+int RamTest_GetInternalRegions(const ram_region_t **out)
+{
+    /* Addresses aren't known until link/load time (extern symbols), so this
+     * is filled in on first call rather than at static-init time. */
+    static ram_region_t regions[4];
+    static bool filled;
+
+    if (!filled) {
+        regions[0] = (ram_region_t){ "DTCM Heap",    (uint32_t)&_heap_start,      (uint32_t)&_heap_end };
+        regions[1] = (ram_region_t){ "AXI RAM_CORE", (uint32_t)&__ram_end__,      (uint32_t)__RAM_EMU_START__ };
+        regions[2] = (ram_region_t){ "AXI RAM_EMU",  (uint32_t)__RAM_EMU_START__, (uint32_t)&__RAM_EMU_END__ };
+        regions[3] = (ram_region_t){ "AHB SRAM1/2",  (uint32_t)&__ahbram_end__,   AHBRAM_END_ADDR };
+        filled = true;
+    }
+
+    *out = regions;
+    return ARRAY_SIZE(regions);
+}
+
 static void report_progress(const char *label, unsigned pct)
 {
     char buf[40];
@@ -135,14 +154,10 @@ void RamTest_RunAll(void)
 {
     s_result_count = 0;
 
-    struct { const char *name; uint32_t start; uint32_t end; } internal[] = {
-        { "DTCM Heap",    (uint32_t)&_heap_start,     (uint32_t)&_heap_end },
-        { "AXI RAM_CORE", (uint32_t)&__ram_end__,     (uint32_t)__RAM_EMU_START__ },
-        { "AXI RAM_EMU",  (uint32_t)__RAM_EMU_START__,(uint32_t)&__RAM_EMU_END__ },
-        { "AHB SRAM1/2",  (uint32_t)&__ahbram_end__,  AHBRAM_END_ADDR },
-    };
+    const ram_region_t *internal;
+    int internal_count = RamTest_GetInternalRegions(&internal);
 
-    for (unsigned i = 0; i < ARRAY_SIZE(internal); i++) {
+    for (int i = 0; i < internal_count; i++) {
         ram_test_result_t *r = &s_results[s_result_count++];
         memset(r, 0, sizeof(*r));
         r->name = internal[i].name;

@@ -23,6 +23,7 @@ Core/Src/gw_ospi_bus.c \
 Core/Src/gw_psram_test.c \
 Core/Src/gw_nor_test.c \
 Core/Src/gw_ram_test.c \
+Core/Src/gw_bench.c \
 Core/Src/main.c \
 Core/Src/sha256.c \
 Core/Src/flashapp.c \

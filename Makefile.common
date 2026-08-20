@@ -337,7 +337,11 @@ LDSCRIPT ?= STM32H7B0VBTx_FLASH.ld
 # libraries
 LIBS = -lc -lm -lnosys
 LIBDIR +=
-LDFLAGS += $(MCU) -specs=nano.specs -T$(LDSCRIPT) $(LIBDIR) $(LIBS) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections
+# -u _printf_float: newlib-nano (-specs=nano.specs) strips floating-point
+# printf/snprintf support by default -- without this, every %f-family
+# conversion silently produces no output instead of a value. Needed by
+# gw_bench.c's throughput/latency reporting (MB/s, ns/us).
+LDFLAGS += $(MCU) -specs=nano.specs -u _printf_float -T$(LDSCRIPT) $(LIBDIR) $(LIBS) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections
 
 # default action: build all
 all: CheckTools CheckDirtySubmodules $(BUILD_DIR) $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET)_extflash.bin $(BUILD_DIR)/$(TARGET)_intflash.bin

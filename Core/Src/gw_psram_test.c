@@ -5,18 +5,34 @@
 #include <stdio.h>
 #include <string.h>
 
-/* IS66WVS4M8FALL/BLL command set (datasheet Table 4.1), SPI mode (1-1-1) only. */
-#define PSRAM_CMD_READ       0x03u
-#define PSRAM_CMD_FAST_READ  0x0Bu
-#define PSRAM_CMD_WRITE      0x02u
-#define PSRAM_CMD_RESET_EN   0x66u
-#define PSRAM_CMD_RESET      0x99u
-#define PSRAM_CMD_READ_ID    0x9Fu
+/* IS66WVS4M8FALL/BLL command set (datasheet Table 4.1). PSRAM_CMD_READ is
+ * unused (kept for reference -- normal 33MHz-max read, superseded by
+ * Fast Read for anything above that). Quad opcodes/dummy counts match
+ * game-and-watch-retro-go-sd's validated cmds_psram table exactly. */
+#define PSRAM_CMD_READ        0x03u
+#define PSRAM_CMD_FAST_READ   0x0Bu
+#define PSRAM_CMD_QUAD_READ   0xEBu  /* 1-4-4, 6 dummy cycles */
+#define PSRAM_CMD_WRITE       0x02u
+#define PSRAM_CMD_QUAD_WRITE  0x38u  /* 1-4-4, 0 dummy cycles */
+#define PSRAM_CMD_RESET_EN    0x66u
+#define PSRAM_CMD_RESET       0x99u
+#define PSRAM_CMD_READ_ID     0x9Fu
 
 static OSPI_HandleTypeDef *s_hospi;
+static psram_io_mode_t s_io_mode = PSRAM_IO_SPI;
+
+void PSRAM_SetIoMode(psram_io_mode_t mode)
+{
+    s_io_mode = mode;
+}
+
+psram_io_mode_t PSRAM_GetIoMode(void)
+{
+    return s_io_mode;
+}
 
 static void psram_cmd(uint8_t instr, uint32_t addr, bool has_addr, uint8_t dummy,
-                      uint8_t *data, size_t len, bool is_write)
+                      uint8_t *data, size_t len, bool is_write, bool quad)
 {
     OSPI_RegularCmdTypeDef c;
     memset(&c, 0, sizeof(c));
@@ -25,13 +41,17 @@ static void psram_cmd(uint8_t instr, uint32_t addr, bool has_addr, uint8_t dummy
     c.FlashId            = 0;
     c.Instruction         = instr;
     c.InstructionSize     = HAL_OSPI_INSTRUCTION_8_BITS;
-    c.InstructionMode     = HAL_OSPI_INSTRUCTION_1_LINE;
-    c.AddressMode         = has_addr ? HAL_OSPI_ADDRESS_1_LINE : HAL_OSPI_ADDRESS_NONE;
+    c.InstructionMode     = HAL_OSPI_INSTRUCTION_1_LINE; /* command byte always single-line, even in quad mode */
+    c.AddressMode         = has_addr
+        ? (quad ? HAL_OSPI_ADDRESS_4_LINES : HAL_OSPI_ADDRESS_1_LINE)
+        : HAL_OSPI_ADDRESS_NONE;
     c.AddressSize         = HAL_OSPI_ADDRESS_24_BITS;
     c.Address             = addr;
     c.AlternateBytesMode  = HAL_OSPI_ALTERNATE_BYTES_NONE;
     c.DummyCycles         = dummy;
-    c.DataMode            = (len > 0) ? HAL_OSPI_DATA_1_LINE : HAL_OSPI_DATA_NONE;
+    c.DataMode            = (len > 0)
+        ? (quad ? HAL_OSPI_DATA_4_LINES : HAL_OSPI_DATA_1_LINE)
+        : HAL_OSPI_DATA_NONE;
     c.NbData              = len;
     c.DQSMode             = HAL_OSPI_DQS_DISABLE;
     c.SIOOMode            = HAL_OSPI_SIOO_INST_EVERY_CMD;
@@ -92,9 +112,9 @@ void PSRAM_Init(OSPI_HandleTypeDef *hospi)
     /* Software reset (RESET ENABLE then RESET, datasheet 5.8). Device also
      * powers up in SPI standby already, this just guarantees a known state
      * regardless of what mode a previous firmware left it in. */
-    psram_cmd(PSRAM_CMD_RESET_EN, 0, false, 0, NULL, 0, true);
+    psram_cmd(PSRAM_CMD_RESET_EN, 0, false, 0, NULL, 0, true, false);
     HAL_Delay(1);
-    psram_cmd(PSRAM_CMD_RESET, 0, false, 0, NULL, 0, true);
+    psram_cmd(PSRAM_CMD_RESET, 0, false, 0, NULL, 0, true, false);
     HAL_Delay(1); /* real tPUmin is 150us (datasheet 3.); 1ms is a comfortable margin. */
 }
 
@@ -104,7 +124,7 @@ bool PSRAM_ReadID(uint8_t *mfid, uint8_t *kgd)
 
     /* Read ID (9Fh): 24-bit don't-care address, 0 wait cycles in SPI mode,
      * then MF ID followed by KGD stream out (datasheet 5.7 / Fig 5.11). */
-    psram_cmd(PSRAM_CMD_READ_ID, 0, true, 0, id, sizeof(id), false);
+    psram_cmd(PSRAM_CMD_READ_ID, 0, true, 0, id, sizeof(id), false, false);
 
     *mfid = id[0];
     *kgd = id[1];
@@ -120,11 +140,13 @@ static uint32_t chunk_len(uint32_t addr, uint32_t remaining)
 
 void PSRAM_Write(uint32_t address, const uint8_t *data, size_t len)
 {
+    bool quad = (s_io_mode == PSRAM_IO_QUAD);
+    uint8_t instr = quad ? PSRAM_CMD_QUAD_WRITE : PSRAM_CMD_WRITE;
+
     while (len > 0) {
         uint32_t n = chunk_len(address, (uint32_t)len);
 
-        /* SPI Write (02h, 1-1-1, 0 wait cycles). */
-        psram_cmd(PSRAM_CMD_WRITE, address, true, 0, (uint8_t *)data, n, true);
+        psram_cmd(instr, address, true, 0, (uint8_t *)data, n, true, quad);
 
         address += n;
         data += n;
@@ -134,14 +156,86 @@ void PSRAM_Write(uint32_t address, const uint8_t *data, size_t len)
 
 void PSRAM_Read(uint32_t address, uint8_t *data, size_t len)
 {
+    bool quad = (s_io_mode == PSRAM_IO_QUAD);
+    uint8_t instr = quad ? PSRAM_CMD_QUAD_READ : PSRAM_CMD_FAST_READ;
+    uint8_t dummy = quad ? 6 : 8;
+
     while (len > 0) {
         uint32_t n = chunk_len(address, (uint32_t)len);
 
-        /* SPI Fast Read (0Bh, 1-1-1, 8 wait cycles, up to 104MHz). */
-        psram_cmd(PSRAM_CMD_FAST_READ, address, true, 8, data, n, false);
+        psram_cmd(instr, address, true, dummy, data, n, false, quad);
 
         address += n;
         data += n;
         len -= n;
     }
+}
+
+static bool s_mmap_active;
+
+bool PSRAM_EnableMemoryMapped(void)
+{
+    if (s_mmap_active) {
+        return true;
+    }
+
+    if (OspiBus_GetPsramCs() == OSPI_BUS_PSRAM_CS_PE9) {
+        /* GPIO CS never gets driven during a hardware-autonomous
+         * memory-mapped burst -- see the doc comment in gw_psram_test.h. */
+        return false;
+    }
+
+    OSPI_RegularCmdTypeDef c;
+    OSPI_MemoryMappedTypeDef mm;
+    memset(&c, 0, sizeof(c));
+
+    c.FlashId             = 0;
+    c.InstructionSize     = HAL_OSPI_INSTRUCTION_8_BITS;
+    c.InstructionMode     = HAL_OSPI_INSTRUCTION_1_LINE;
+    c.AddressSize         = HAL_OSPI_ADDRESS_24_BITS;
+    c.AddressMode         = HAL_OSPI_ADDRESS_4_LINES;
+    c.AlternateBytesMode  = HAL_OSPI_ALTERNATE_BYTES_NONE;
+    c.DataMode            = HAL_OSPI_DATA_4_LINES;
+    c.DQSMode             = HAL_OSPI_DQS_DISABLE;
+    c.SIOOMode            = HAL_OSPI_SIOO_INST_EVERY_CMD;
+    c.InstructionDtrMode  = HAL_OSPI_INSTRUCTION_DTR_DISABLE;
+
+    /* Read config: quad read 0xEB, 6 dummy cycles. */
+    c.OperationType = HAL_OSPI_OPTYPE_READ_CFG;
+    c.Instruction = PSRAM_CMD_QUAD_READ;
+    c.DummyCycles = 6;
+    if (HAL_OSPI_Command(s_hospi, &c, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+        Error_Handler();
+    }
+
+    /* Write config: quad write 0x38, 0 dummy cycles. */
+    c.OperationType = HAL_OSPI_OPTYPE_WRITE_CFG;
+    c.Instruction = PSRAM_CMD_QUAD_WRITE;
+    c.DummyCycles = 0;
+    if (HAL_OSPI_Command(s_hospi, &c, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+        Error_Handler();
+    }
+
+    mm.TimeOutActivation = HAL_OSPI_TIMEOUT_COUNTER_DISABLE;
+    mm.TimeOutPeriod = 0;
+    if (HAL_OSPI_MemoryMapped(s_hospi, &mm) != HAL_OK) {
+        Error_Handler();
+    }
+
+    s_mmap_active = true;
+    return true;
+}
+
+void PSRAM_DisableMemoryMapped(void)
+{
+    if (!s_mmap_active) {
+        return;
+    }
+    HAL_OSPI_Abort(s_hospi);
+    s_mmap_active = false;
+}
+
+bool PSRAM_IsMemoryMapped(void)
+{
+    return s_mmap_active;
 }

@@ -32,6 +32,7 @@
 #include "gw_psram_test.h"
 #include "gw_nor_test.h"
 #include "gw_ram_test.h"
+#include "gw_bench.h"
 
 #include "odroid_colors.h"
 #include "odroid_system.h"
@@ -96,7 +97,7 @@ static bool wdog_enabled;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
-void SystemClock_Config(void);
+void SystemClock_Config(uint8_t oc_level);
 static void MPU_Config(void);
 static void ensure_option_bytes(void);
 static void MX_GPIO_Init(void);
@@ -575,7 +576,7 @@ int main(void)
   /* USER CODE END Init */
 
   /* Configure the system clock */
-  SystemClock_Config();
+  SystemClock_Config(0);
 
   /* USER CODE BEGIN SysInit */
 
@@ -650,7 +651,9 @@ int main(void)
     bq24072_init();
 
     RamTest_RunAll();
+    BenchTest_RunAll();
 
+    bool show_bench = false;
     uint32_t last_change = HAL_GetTick();
     uint32_t prev_buttons = 0;
     uint32_t power_hold_start = 0;
@@ -678,11 +681,29 @@ int main(void)
       if ((cur_buttons & (1u << 9)) && (now - power_hold_start >= 5000)) {
         GW_EnterDeepSleep();
       }
+
+      /* A/B toggles between the correctness report and the clock-level
+       * benchmark sweep; LEFT/RIGHT pages through the benchmark's clock
+       * levels (see BenchTest_RunAll()). */
+      if (newly_pressed & (B_A | B_B)) {
+        show_bench = !show_bench;
+      }
+      if (show_bench && (newly_pressed & B_Left)) {
+        BenchTest_PrevPage();
+      }
+      if (show_bench && (newly_pressed & B_Right)) {
+        BenchTest_NextPage();
+      }
       prev_buttons = cur_buttons;
 
       odroid_overlay_draw_fill_rect(0, 0, GW_LCD_WIDTH, GW_LCD_HEIGHT, 0x0000);
-      odroid_overlay_draw_text(4, 2, GW_LCD_WIDTH - 8, "RAM TEST", 0xFFFF, 0x0000);
-      RamTest_DrawReport(4, 20, GW_LCD_WIDTH - 8);
+      if (show_bench) {
+        odroid_overlay_draw_text(4, 2, GW_LCD_WIDTH - 8, "BENCH (A/B: RAM TEST)", 0xFFFF, 0x0000);
+        BenchTest_DrawReport(4, 20, GW_LCD_WIDTH - 8);
+      } else {
+        odroid_overlay_draw_text(4, 2, GW_LCD_WIDTH - 8, "RAM TEST (A/B: BENCH)", 0xFFFF, 0x0000);
+        RamTest_DrawReport(4, 20, GW_LCD_WIDTH - 8);
+      }
 
       {
         odroid_battery_state_t batt = odroid_input_read_battery();
@@ -728,12 +749,36 @@ int main(void)
   * @brief System Clock Configuration
   * @retval None
   */
-void SystemClock_Config(void)
+/* oc_level presets, ported from the validated psram-only firmware
+ * (CapnRon/game-and-watch-retro-go-sd, commit eceeef5d and friends --
+ * see BENCH.md). Core clock = HSI/PLLM * PLLN/PLLP. OSPI clock, when
+ * sourced from the PLL (levels 1-3), = HSI/PLLM * PLLN/PLLQ; level 0
+ * instead sources OSPI from CKPER (HSI, fixed 64MHz, independent of
+ * PLL1) -- unchanged from this firmware's original single-clock config.
+ *
+ *   0 (stock)      : PLLN=140 PLLQ=2  -> 280MHz core, OSPI on CKPER (64MHz)
+ *   1 (Intermediate): PLLN=156 PLLQ=6  -> 312MHz core, 104MHz OSPI (PSRAM's datasheet max)
+ *   2 (Maximum)     : PLLN=170 PLLQ=7  -> 340MHz core,  97MHz OSPI
+ *   3 (Aggressive)  : PLLN=420 PLLQ=7, PLLM=38 -> ~354MHz core, 101MHz OSPI
+ *                      (not exposed in the retro-go menu; core-only headroom
+ *                      probe, included here for benchmark completeness)
+ */
+void SystemClock_Config(uint8_t oc_level)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
   RCC_CRSInitTypeDef RCC_CRSInitStruct = {0};
+
+  /* Make sure we are running on HSI clock before touching PLL1's settings.
+   * HAL_RCC_OscConfig() below refuses to reconfigure a PLL that is
+   * currently the active SYSCLK source (returns HAL_ERROR, which lands in
+   * Error_Handler() -> BSOD(BSOD_OTHER, ...)). The very first boot-time
+   * call works without this because SYSCLK is still HSI by default at
+   * reset; any later call (e.g. the benchmark switching clock levels at
+   * runtime) is already running from PLL1 and needs this step first. */
+  RCC->CFGR &= ~RCC_CFGR_SW;
+  RCC->CFGR |= RCC_CFGR_SW_HSI;
 
   /** Supply configuration update enable
   */
@@ -762,10 +807,32 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 16;
-  RCC_OscInitStruct.PLL.PLLN = 140;
-  RCC_OscInitStruct.PLL.PLLP = 2;
-  RCC_OscInitStruct.PLL.PLLQ = 2;
+  switch (oc_level) {
+    case 1: /* Intermediate */
+      RCC_OscInitStruct.PLL.PLLM = 16;
+      RCC_OscInitStruct.PLL.PLLN = 156;
+      RCC_OscInitStruct.PLL.PLLP = 2;
+      RCC_OscInitStruct.PLL.PLLQ = 6;
+      break;
+    case 2: /* Maximum */
+      RCC_OscInitStruct.PLL.PLLM = 16;
+      RCC_OscInitStruct.PLL.PLLN = 170;
+      RCC_OscInitStruct.PLL.PLLP = 2;
+      RCC_OscInitStruct.PLL.PLLQ = 7;
+      break;
+    case 3: /* Aggressive */
+      RCC_OscInitStruct.PLL.PLLM = 38;
+      RCC_OscInitStruct.PLL.PLLN = 420;
+      RCC_OscInitStruct.PLL.PLLP = 2;
+      RCC_OscInitStruct.PLL.PLLQ = 7;
+      break;
+    default: /* 0: stock, no overclock */
+      RCC_OscInitStruct.PLL.PLLM = 16;
+      RCC_OscInitStruct.PLL.PLLN = 140;
+      RCC_OscInitStruct.PLL.PLLP = 2;
+      RCC_OscInitStruct.PLL.PLLQ = 2;
+      break;
+  }
   RCC_OscInitStruct.PLL.PLLR = 2;
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_2;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
@@ -811,7 +878,8 @@ void SystemClock_Config(void)
   PeriphClkInitStruct.PLL3.PLL3RGE = RCC_PLL3VCIRANGE_3;
   PeriphClkInitStruct.PLL3.PLL3VCOSEL = RCC_PLL3VCOWIDE;
   PeriphClkInitStruct.PLL3.PLL3FRACN = 0;
-  PeriphClkInitStruct.OspiClockSelection = RCC_OSPICLKSOURCE_CLKP;
+  PeriphClkInitStruct.OspiClockSelection = (oc_level == 0)
+      ? RCC_OSPICLKSOURCE_CLKP : RCC_OSPICLKSOURCE_PLL;
   PeriphClkInitStruct.CkperClockSelection = RCC_CLKPSOURCE_HSI;
   PeriphClkInitStruct.Sai1ClockSelection = RCC_SAI1CLKSOURCE_PLL2;
   PeriphClkInitStruct.Spi123ClockSelection = RCC_SPI123CLKSOURCE_CLKP;

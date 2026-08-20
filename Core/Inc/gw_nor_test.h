@@ -33,4 +33,12 @@ bool NorTest_ReadID(uint8_t id[3], const char **name);
  * don't do here). Returns true if both reads matched. */
 bool NorTest_ReadConsistency(uint32_t address, uint8_t len);
 
+/* Sequential read of `len` bytes starting at `address` into `data`, chunked
+ * internally (unlike PSRAM this chip has no page-wrap restriction on plain
+ * SPI reads, but chunking keeps each HAL_OSPI transaction and its timeout
+ * bounded). Read-only, safe on any NOR content -- used by the benchmark for
+ * throughput/latency measurement, not correctness (see NorTest_ReadConsistency
+ * for that). */
+void NorTest_Read(uint32_t address, uint8_t *data, size_t len);
+
 #endif

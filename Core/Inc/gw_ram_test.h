@@ -19,6 +19,19 @@ typedef struct {
     const char *detail;
 } ram_test_result_t;
 
+typedef struct {
+    const char *name;
+    uint32_t    start;
+    uint32_t    end;
+} ram_region_t;
+
+/* Returns the internal-SRAM region table (same regions RamTest_RunAll()
+ * verifies: DTCM heap, free tail of AXI RAM_CORE, all of AXI RAM_EMU, free
+ * tail of AHB SRAM1/2) via *out, and its length. Shared with gw_bench.c so
+ * the benchmark exercises exactly the same boundaries the correctness test
+ * does, from one source of truth. */
+int RamTest_GetInternalRegions(const ram_region_t **out);
+
 /* Runs a full address+checkerboard pattern test over every internal SRAM
  * region this diagnostic build never otherwise touches (DTCM heap, the free
  * tail of AXI RAM_CORE, all of AXI RAM_EMU, and the free tail of AHB

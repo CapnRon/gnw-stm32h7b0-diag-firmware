@@ -116,6 +116,11 @@ void GW_EnterDeepSleep(void);
 uint32_t GW_GetBootButtons(void);
 void wdog_refresh(void);
 
+/* oc_level: 0=stock, 1=Intermediate, 2=Maximum, 3=Aggressive -- see the
+ * preset table above SystemClock_Config()'s definition in main.c. */
+void SystemClock_Config(uint8_t oc_level);
+extern OSPI_HandleTypeDef hospi1;
+
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
