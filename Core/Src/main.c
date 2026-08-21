@@ -1639,6 +1639,31 @@ void MPU_Config(void)
   MPU_InitStruct.Size = MPU_REGION_SIZE_4KB;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
+  /* OSPI1 memory-mapped PSRAM window (0x90000000, 4MB). Without an
+   * explicit region here it falls under the default "External RAM"
+   * attributes -- Normal, Cacheable, Write-Back -- and a raw store
+   * through the mapped pointer gets write-allocated into D-Cache instead
+   * of going out to the peripheral immediately; the eventual write-back
+   * at an arbitrary later eviction produced a reproducible imprecise
+   * BusFault during this benchmark's bring-up (see gw_bench.c
+   * bench_psram_mmap_write()). Strongly Ordered (same TEX/C/B as this
+   * function's other "uncached" regions above) forces every access out
+   * as an immediate, ordered bus transaction -- no caching, no
+   * buffering/reordering -- which is what actually fixes it, not just
+   * makes it less likely. Exec disabled: nothing here is ever code. */
+  MPU_InitStruct.Enable = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number = MPU_REGION_NUMBER7;
+  MPU_InitStruct.BaseAddress = 0x90000000;
+  MPU_InitStruct.Size = MPU_REGION_SIZE_4MB;
+  MPU_InitStruct.SubRegionDisable = 0x0;
+  MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable = MPU_ACCESS_NOT_SHAREABLE;
+  MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
+  MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
+  HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
   /* Enables the MPU */
   HAL_MPU_Enable(MPU_HFNMI_PRIVDEF);
 

@@ -43,6 +43,18 @@ typedef struct {
  *    vs Quad 1-4-4, opcodes 0x02/0x0B vs 0x38/0xEB -- the quad path
  *    matches the one already proven on real hardware in the psram-only
  *    firmware's gw_flash.c cmds_psram table, commit fdd3cd04).
+ *  - Memory-mapped PSRAM (if the detected chip-select is PE11/PC11 --
+ *    see PSRAM_EnableMemoryMapped()'s doc comment for why PE9 is
+ *    excluded): same clock/SampleShifting matrix, real reads AND writes
+ *    straight through the PSRAM_MMAP_BASE pointer. See
+ *    bench_psram_mmap()'s doc comment (gw_bench.c) for how a raw store
+ *    through that pointer went from a reliable CPU double fault/lockup
+ *    to fully working: STM32H72x/73x errata 2.8.6 ("Memory-mapped write
+ *    error response when DQS output is disabled") -- fixed by enabling
+ *    DQS in the write config even though this PSRAM has no physical DQS
+ *    pin and doesn't need one, purely as an internal SoC-side
+ *    workaround. Confirmed at every scale from a single word up to the
+ *    full 4MB.
  *  - NOR flash (if NorTest_ReadID() gets a non-empty response): same
  *    clock/SampleShifting matrix as PSRAM above. IO width is not swept
  *    for NOR -- gw_nor_test.c intentionally only issues universal
@@ -55,11 +67,15 @@ typedef struct {
  *  before trusting its throughput number -- a corrupted-but-fast read
  *  must never look like a good result.
  *
- * ChipSelectBoundary is deliberately not swept: this driver only ever
- * issues indirect-mode OSPI commands pre-chunked in software to stay
- * within one PSRAM page (gw_psram_test.c chunk_len()), so CSBOUND's
- * automatic memory-mapped-mode CS re-toggle never engages here --
- * sweeping it would measure nothing real.
+ * ChipSelectBoundary is fixed at 10 (2^10=1024, this PSRAM's page size)
+ * for every config, not swept: it's required for memory-mapped
+ * correctness (makes the peripheral auto-reissue command+address at
+ * every page boundary within one continuous AXI burst, instead of
+ * silently reading/writing the PSRAM chip's own page-wrap garbage across
+ * one), and it's inert for every indirect-mode command in this file --
+ * they're all pre-chunked in software to stay within one PSRAM page
+ * (gw_psram_test.c chunk_len()), so the hardware auto-split never has an
+ * opportunity to engage there either way. Safe to apply everywhere.
  *
  * Blocking (this is a multi-config sweep, expect several seconds to low
  * tens of seconds depending on what's detected). Prints full per-row

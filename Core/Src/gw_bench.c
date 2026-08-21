@@ -152,7 +152,13 @@ static void report_progress(const char *label, unsigned pct)
  * after each access drains the load/store queue, so consecutive reps can't
  * pipeline-overlap the way a streaming throughput loop does. This is a
  * different, and genuinely useful, number from write_mb_s/read_mb_s --
- * it's the cost of one access in isolation, not sustained bandwidth. */
+ * it's the cost of one access in isolation, not sustained bandwidth.
+ *
+ * Also used for memory-mapped PSRAM (bench_psram_mmap()): safe to reuse
+ * as-is there now that MPU_Config() (main.c) covers PSRAM_MMAP_BASE with
+ * a Strongly Ordered region, so there's no D-Cache to produce a
+ * cache-hit-inflated result the way an earlier, PSRAM-specific version of
+ * this measurement did before that MPU region existed. */
 static float measure_sram_latency_ns(volatile uint32_t *p)
 {
     const int reps = 128;
@@ -177,42 +183,6 @@ static float measure_sram_latency_ns(volatile uint32_t *p)
     }
 
     return cycles_to_ns(total / (uint32_t)(2 * reps));
-}
-
-/* Read-only counterpart, for devices where a raw store through the pointer
- * isn't safe -- specifically memory-mapped PSRAM (bench_psram_mmap()):
- * this driver only ever writes PSRAM through indirect commands, even with
- * memory-mapped mode enabled (matches the production psram-only
- * firmware's gw_littlefs.c, which always routes writes through indirect
- * OSPI_Program() and never stores through the mapped pointer). A raw
- * `p[0] = ...` here reproducibly hardfaults (imprecise BusFault, CFSR bit10,
- * ABFSR AXIM) -- caught live via BSOD()'s stacked FATAL EXCEPTION message
- * during this feature's bring-up. */
-static float measure_mmap_read_latency_ns(volatile uint32_t *p)
-{
-    const int reps = 128;
-    uint32_t total = 0;
-
-    for (int i = 0; i < reps; i++) {
-        /* Force a genuine cold access every rep -- without this, rep 1
-         * fetches p[0]'s line into D-Cache (this region has no MPU
-         * override, so it's Normal/Cacheable/Write-Back by default) and
-         * reps 2-128 would just be cache hits, never touching the OSPI
-         * peripheral at all. Caught by inspection, not a crash: the first
-         * version of this measurement (reused from the SRAM helper) gave
-         * ~23-32ns, implausibly close to a D-Cache hit's cycle cost and
-         * nowhere near a real SPI transaction's. */
-        SCB_InvalidateDCache_by_Addr((uint32_t *)&p[0], 4);
-        __DSB(); __ISB();
-        uint32_t t0 = dwt_now();
-        volatile uint32_t v = p[0];
-        __DSB();
-        uint32_t t1 = dwt_now();
-        (void)v;
-        total += (t1 - t0);
-    }
-
-    return cycles_to_ns(total / (uint32_t)reps);
 }
 
 static void bench_sram_region(const ram_region_t *reg, bench_row_t *out)
@@ -373,45 +343,47 @@ static bool bench_nor(bench_row_t *out)
     return pass;
 }
 
-/* Memory-mapped (XIP) PSRAM read benchmark, matching how the production
- * psram-only firmware actually uses this address range (gw_littlefs.c's
- * littlefs_api_read(): plain pointer/memcpy reads through the mapped
- * window; writes there go through indirect PSRAM_Write(), same as the
- * indirect benchmark above -- MM write throughput isn't a separate real
- * number, so this row is read-only, like the NOR rows).
+/* Memory-mapped (XIP) PSRAM read+write benchmark. Real reads AND writes,
+ * straight through the mapped pointer at PSRAM_MMAP_BASE. Getting here
+ * took two wrong turns, both worth keeping on record:
  *
- * Cache correctness: none of this firmware's MPU regions cover
- * 0x90000000, so it falls under the CPU's default "External RAM"
- * attributes (Normal, Cacheable, Write-Back) with D-Cache enabled
- * (SCB_EnableDCache() in main()) -- a naive write-then-read-back check
- * would risk just hitting D-Cache and never actually touching PSRAM.
- * Fixed the same way gw_littlefs.c does it: write the known pattern via
- * the already-proven indirect path, then Clean+Invalidate the whole
- * range before the measured/verified memory-mapped read pass, so a stale
- * or dirty cache line can't shadow real chip content either way. */
+ *  1. First guess: a raw store faulted because no MPU region covered
+ *     this window, so it fell under the CPU's default Normal/Cacheable/
+ *     Write-Back attributes -- a store would write-allocate a D-Cache
+ *     line and the deferred write-back would fault later, at an
+ *     unrelated PC. Added an explicit Strongly Ordered MPU region
+ *     (MPU_Config(), main.c) -- verified correct by reading the live
+ *     MPU_RNR/RBAR/RASR registers over SWD. Made no difference: fault
+ *     reproduced identically, so this wasn't the cause (though the
+ *     region is still correct/good practice and stays).
+ *  2. Bisected with a debugger, `call`ing PSRAM_TestMmapWrite() directly
+ *     with shrinking word counts -- down to a single word, still faulted
+ *     the same way, and even a raw debug-probe write (bypassing the CPU
+ *     entirely, no instruction execution, no caching) faulted too. That
+ *     ruled out every CPU-side explanation and pointed at the OCTOSPI
+ *     peripheral itself.
+ *
+ * Real cause: STM32H72x/73x errata 2.8.6, "Memory-mapped write error
+ * response when DQS output is disabled." On parts with the OCTOSPI
+ * memory-mapped region on the AXI bus, writes are always done
+ * internally in 64-bit chunks with DQS used to mask down to the actual
+ * access size -- with DQS disabled (this PSRAM has no physical DQS pin,
+ * so that seemed like the obviously-correct setting) that masking
+ * breaks and the write comes back as an AXI bus error. Fix applied in
+ * PSRAM_EnableMemoryMapped()'s write config: DQSMode = ENABLE anyway,
+ * purely as an internal SoC-side workaround -- the external chip still
+ * neither has nor needs a real DQS signal. Confirmed on real hardware:
+ * a single word, one page, and the full 4MB (crossing every page
+ * boundary in the chip) all write cleanly with this fix.
+ *
+ * The Strongly Ordered MPU region also means no D-Cache management calls
+ * are needed around this benchmark -- this region is genuinely
+ * non-cacheable in hardware, not just conventionally treated that way. */
 static bool bench_psram_mmap(bench_row_t *out)
 {
     volatile uint32_t *p = (volatile uint32_t *)PSRAM_MMAP_BASE;
     uint32_t words = PSRAM_SIZE_BYTES / 4u;
     bool pass = true;
-
-    /* Fill via the already-verified indirect path (quad, for speed). */
-    PSRAM_SetIoMode(PSRAM_IO_QUAD);
-    {
-        static uint8_t wbuf[PSRAM_PAGE_BYTES];
-        uint32_t chunks = PSRAM_SIZE_BYTES / PSRAM_PAGE_BYTES;
-        for (uint32_t c = 0; c < chunks; c++) {
-            uint32_t addr = c * PSRAM_PAGE_BYTES;
-            for (uint32_t i = 0; i < PSRAM_PAGE_BYTES; i += 4) {
-                uint32_t val = addr + i;
-                memcpy(&wbuf[i], &val, 4);
-            }
-            PSRAM_Write(addr, wbuf, PSRAM_PAGE_BYTES);
-            wdog_refresh();
-        }
-    }
-
-    SCB_CleanInvalidateDCache_by_Addr((uint32_t *)PSRAM_MMAP_BASE, PSRAM_SIZE_BYTES);
 
     if (!PSRAM_EnableMemoryMapped()) {
         out->ran = false;
@@ -421,43 +393,39 @@ static bool bench_psram_mmap(bench_row_t *out)
     dwt_enable();
 
     uint32_t t0 = dwt_now();
+    for (uint32_t i = 0; i < words; i++) {
+        p[i] = i;
+        if ((i & 0xFFFu) == 0) wdog_refresh();
+    }
+    uint32_t t1 = dwt_now();
+
     uint32_t sink = 0;
     for (uint32_t i = 0; i < words; i++) {
         sink += p[i];
         if ((i & 0xFFFu) == 0) wdog_refresh();
     }
-    uint32_t t1 = dwt_now();
+    uint32_t t2 = dwt_now();
     (void)sink;
 
     for (uint32_t i = 0; i < words; i++) {
-        /* Fill step wrote byte_offset as the value (matches PSRAM_Write's
-         * byte-addressed convention); p[i] is byte offset i*4, so the
-         * expected value is i*4, not i. */
-        if (p[i] != i * 4u) { pass = false; break; }
+        if (p[i] != i) { pass = false; break; }
         if ((i & 0xFFFu) == 0) wdog_refresh();
     }
 
-    out->read_mb_s = cycles_to_mb_s(t1 - t0, PSRAM_SIZE_BYTES);
-    out->write_mb_s = 0.0f;
-    out->writable = false;
+    /* Leave PSRAM zeroed, matching every other PSRAM benchmark's
+     * convention -- straight through the mapped pointer, same as above. */
+    for (uint32_t i = 0; i < words; i++) {
+        p[i] = 0;
+        if ((i & 0xFFFu) == 0) wdog_refresh();
+    }
+
+    out->write_mb_s = cycles_to_mb_s(t1 - t0, PSRAM_SIZE_BYTES);
+    out->read_mb_s  = cycles_to_mb_s(t2 - t1, PSRAM_SIZE_BYTES);
+    out->writable = true;
     out->pass = pass;
-    out->latency_ns = measure_mmap_read_latency_ns(p);
+    out->latency_ns = measure_sram_latency_ns(p);
 
     PSRAM_DisableMemoryMapped();
-    SCB_InvalidateDCache_by_Addr((uint32_t *)PSRAM_MMAP_BASE, PSRAM_SIZE_BYTES);
-
-    /* Zero the chip back out via the indirect path, matching every other
-     * PSRAM benchmark's convention (leave PSRAM zeroed when done). */
-    {
-        static uint8_t zbuf[PSRAM_PAGE_BYTES];
-        memset(zbuf, 0, sizeof(zbuf));
-        uint32_t chunks = PSRAM_SIZE_BYTES / PSRAM_PAGE_BYTES;
-        for (uint32_t c = 0; c < chunks; c++) {
-            PSRAM_Write(c * PSRAM_PAGE_BYTES, zbuf, PSRAM_PAGE_BYTES);
-            wdog_refresh();
-        }
-    }
-    PSRAM_SetIoMode(PSRAM_IO_SPI);
 
     return pass;
 }
@@ -563,9 +531,9 @@ void BenchTest_RunAll(void)
                 bench_psram_mmap(out);
                 out->ran = true;
 
-                printf("BENCH: PSRAM(mmap)    lvl=%u(%s) SS=%-9s R=%.2fMB/s Lat=%.2fus %s\n",
+                printf("BENCH: PSRAM(mmap)    lvl=%u(%s) SS=%-9s W=%.2fMB/s R=%.2fMB/s Lat=%.2fus %s\n",
                        level, s_level_name[level], ss ? "HALFCYCLE" : "NONE",
-                       out->read_mb_s, out->latency_ns / 1000.0f,
+                       out->write_mb_s, out->read_mb_s, out->latency_ns / 1000.0f,
                        out->pass ? "PASS" : "FAIL");
             }
 
@@ -657,10 +625,10 @@ void BenchTest_DrawReport(int x, int y, int width)
         uint16_t color = row->ran ? (row->pass ? 0x07E0 : 0xF800) : 0x8410;
 
         fmt_latency(lat, sizeof(lat), row->latency_ns);
-        snprintf(buf, sizeof(buf), "PSRAM(mm) SS:%c %s R:%.1f %s",
+        snprintf(buf, sizeof(buf), "PSRAM(mm) SS:%c %-4s W:%.1f R:%.1f %s",
                  ss ? 'H' : 'N',
                  row->ran ? (row->pass ? "PASS" : "FAIL") : "--",
-                 row->read_mb_s, lat);
+                 row->write_mb_s, row->read_mb_s, lat);
         line_y += odroid_overlay_draw_text(x, line_y, width, buf, color, 0x0000);
     }
 

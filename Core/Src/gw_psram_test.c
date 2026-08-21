@@ -208,10 +208,26 @@ bool PSRAM_EnableMemoryMapped(void)
         Error_Handler();
     }
 
-    /* Write config: quad write 0x38, 0 dummy cycles. */
+    /* Write config: quad write 0x38, 0 dummy cycles.
+     *
+     * DQSMode = ENABLE here, deliberately different from the read config
+     * above, per STM32H72x/73x errata 2.8.6 "Memory-mapped write error
+     * response when DQS output is disabled": on parts with the OCTOSPI
+     * memory-mapped region on the AXI bus, writes are always done
+     * internally in 64-bit chunks, with DQS used to mask down to the
+     * actual access size. With DQS disabled that masking breaks and the
+     * write comes back as an AXI bus error -- reproducibly, on this
+     * hardware, for literally any memory-mapped write, down to a single
+     * word (Cortex-M double fault/lockup; confirmed independent of CPU
+     * memory attributes, and identical whether the store came from
+     * compiled CPU code or a debug probe writing the address directly).
+     * This PSRAM has no physical DQS pin and doesn't need one -- this is
+     * purely a workaround for the SoC's internal AXI-write masking, not
+     * anything the external chip cares about. */
     c.OperationType = HAL_OSPI_OPTYPE_WRITE_CFG;
     c.Instruction = PSRAM_CMD_QUAD_WRITE;
     c.DummyCycles = 0;
+    c.DQSMode = HAL_OSPI_DQS_ENABLE;
     if (HAL_OSPI_Command(s_hospi, &c, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
         Error_Handler();
     }

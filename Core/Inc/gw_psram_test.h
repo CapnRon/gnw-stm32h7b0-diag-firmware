@@ -60,6 +60,16 @@ void PSRAM_Read(uint32_t address, uint8_t *data, size_t len);
  * (game-and-watch-retro-go-sd's gw_flash.c OSPI_EnableMemoryMappedMode()):
  * quad read (0xEB, 6 dummy) for the read config, quad write (0x38, 0
  * dummy) for the write config, memory-mapped timeout counter disabled.
+ * One deliberate difference from that reference: the write config here
+ * sets DQSMode = HAL_OSPI_DQS_ENABLE (the read config stays DISABLE, per
+ * STM32H72x/73x errata 2.8.6, "Memory-mapped write error response when
+ * DQS output is disabled" -- without it, a memory-mapped write comes
+ * back as an AXI bus error regardless of write size, down to a single
+ * word, even though this PSRAM has no physical DQS pin and doesn't need
+ * one. This is a pure SoC-internal workaround (the OCTOSPI's AXI-side
+ * write path always operates in 64-bit chunks and uses DQS to mask down
+ * to the actual access size); confirmed on real hardware from a single
+ * word up to a full 4MB write crossing every page boundary in the chip.
  * ChipSelectBoundary must already be set to 10 (2^10=1024, this PSRAM's
  * page size) via the OSPI Init that's active when this is called -- that
  * makes the peripheral auto-reissue command+address at every page
