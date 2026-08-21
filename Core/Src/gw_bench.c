@@ -325,8 +325,21 @@ static bool bench_nor(bench_row_t *out)
     }
 
     out->read_mb_s = cycles_to_mb_s(read_cycles, total);
-    out->write_mb_s = 0.0f;
-    out->writable = false;
+    out->writable = true;
+
+    /* Write throughput: erase+program a small, fixed, out-of-the-way
+     * region (see NOR_TEST_WRITE_OFFSET/_SIZE) -- destructive to that
+     * region only. Timed cycles cover erase+program together, since
+     * that combined cost is the real, honest price of a NOR "write";
+     * measuring program time alone would understate it and wouldn't be
+     * a fair comparison against PSRAM/SRAM. */
+    {
+        uint32_t t0 = dwt_now();
+        bool write_ok = NorTest_Write(NOR_TEST_WRITE_OFFSET, NOR_TEST_WRITE_SIZE);
+        uint32_t t1 = dwt_now();
+        out->write_mb_s = cycles_to_mb_s(t1 - t0, NOR_TEST_WRITE_SIZE);
+        pass = pass && write_ok;
+    }
     out->pass = pass;
 
     {
@@ -548,9 +561,9 @@ void BenchTest_RunAll(void)
                 bench_nor(out);
                 out->ran = true;
 
-                printf("BENCH: NOR flash      lvl=%u(%s) SS=%-9s R=%.2fMB/s Lat=%.2fus %s\n",
+                printf("BENCH: NOR flash      lvl=%u(%s) SS=%-9s W=%.2fMB/s R=%.2fMB/s Lat=%.2fus %s\n",
                        level, s_level_name[level], ss ? "HALFCYCLE" : "NONE",
-                       out->read_mb_s, out->latency_ns / 1000.0f,
+                       out->write_mb_s, out->read_mb_s, out->latency_ns / 1000.0f,
                        out->pass ? "PASS" : "FAIL");
             }
         }
@@ -641,7 +654,8 @@ void BenchTest_DrawReport(int x, int y, int width)
         snprintf(buf, sizeof(buf), "NOR   SS:%-9s %s", ss ? "HALFCYCLE" : "NONE",
                  row->ran ? (row->pass ? "PASS" : "FAIL") : "--");
         line_y += odroid_overlay_draw_text(x, line_y, width, buf, color, 0x0000);
-        snprintf(buf, sizeof(buf), "  R:%.1f MB/s Lat:%s", row->read_mb_s, lat);
+        snprintf(buf, sizeof(buf), "  W:%.1f R:%.1f MB/s Lat:%s",
+                 row->write_mb_s, row->read_mb_s, lat);
         line_y += odroid_overlay_draw_text(x, line_y, width, buf, 0xFFFF, 0x0000);
     }
 

@@ -7,14 +7,31 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Non-destructive presence + read-function test for the original NOR flash
- * chip, now piggybacked on the same OSPI bus as the PSRAM (see
- * gw_ospi_bus.h) but kept on its original CE# (PE11 / hardware NCS,
- * unchanged from stock). This deliberately never erases or writes -- this
- * chip may hold real stored ROM/asset/save data from other firmware builds,
- * unlike the PSRAM (which is volatile and always safe to fully exercise). */
+/* Presence + read-function test for the original NOR flash chip, now
+ * piggybacked on the same OSPI bus as the PSRAM (see gw_ospi_bus.h) but
+ * kept on its original CE# (PE11 / hardware NCS, unchanged from stock).
+ * The write benchmark (NorTest_Write, below) IS destructive, unlike
+ * everything else in this file -- it is restricted to a small, fixed,
+ * out-of-the-way region (NOR_TEST_WRITE_OFFSET/_SIZE) specifically so it
+ * never touches data elsewhere on the chip. Everything else here is
+ * read-only and safe on any NOR content. */
 
 void NorTest_Init(OSPI_HandleTypeDef *hospi);
+
+/* Region used by the write-throughput benchmark. Chosen to sit well
+ * within even the smallest part in nor_id_table (1MB), and away from
+ * address 0 in case anything ever cares about that region specifically. */
+#define NOR_TEST_WRITE_OFFSET 0x00080000u
+#define NOR_TEST_WRITE_SIZE   0x00010000u /* 64KB, 16 sectors */
+
+/* Erases (4KB sectors) then programs (256B pages) `len` bytes at
+ * `address` with a fixed test pattern, then reads it back and verifies.
+ * DESTRUCTIVE -- overwrites whatever was stored there. `len` must be a
+ * multiple of 4096. Returns true if erase+program+verify all succeeded.
+ * Timed cycles cover erase+program together, since on real NOR there is
+ * no way to write without erasing first -- that combined cost is the
+ * honest "write speed" to compare against PSRAM/SRAM. */
+bool NorTest_Write(uint32_t address, size_t len);
 
 /* Reads the 3-byte JEDEC ID (9Fh, standard on essentially all SPI NOR
  * parts regardless of address width or quad-mode state). Looks it up
