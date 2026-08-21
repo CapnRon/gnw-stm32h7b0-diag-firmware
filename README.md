@@ -23,7 +23,61 @@ the first one that answers MF=0x9D / KGD=0x5D. The test log prints the
 detected pin, e.g. `PSRAM CS: PE11 (OSPI NCS)`. The RAM test then runs the
 full read/write verification (two pattern passes) over the 4MB PSRAM, plus
 all four internal SRAM regions, and reports the NOR JEDEC ID (absent when
-the NOR has been removed).
+the NOR has been removed). If no PSRAM answers on any candidate, PE11 is
+restored to the OSPI peripheral's hardware NCS function before the probe
+returns -- the last candidate leaves it parked as a plain input, and NOR
+(which is hardware-NCS on PE11, the board's stock pin) would otherwise
+silently stop responding to every command afterward.
+
+## Benchmark suite (A/B: BENCH)
+
+Alongside the pass/fail RAM test, pressing A or B switches to a clock/OSPI
+benchmark sweep (`Core/Src/gw_bench.c`). It measures real read+write
+throughput and latency for every internal SRAM region, the PSRAM (indirect
+and memory-mapped, when present), and the NOR flash, at four CPU/OSPI clock
+levels: Stock (280/64 MHz), Intermediate (312/104), Maximum (340/97), and
+Aggressive (354/101). Use LEFT/RIGHT to page through clock levels.
+
+Results below are from a real board with the NOR flash reinstalled
+(PSRAM removed), MX25U51245G detected:
+
+| Device | Clock level | Write | Read | Latency |
+|---|---|---|---|---|
+| DTCM Heap | Stock (280/64) | 266.4 MB/s | 266.2 MB/s | 29ns |
+| DTCM Heap | Intermediate (312/104) | 247.5 MB/s | 296.6 MB/s | 26ns |
+| DTCM Heap | Maximum (340/97) | 323.4 MB/s | 323.2 MB/s | 24ns |
+| DTCM Heap | Aggressive (354/101) | 336.4 MB/s | 336.2 MB/s | 23ns |
+| AXI RAM_CORE | Stock | 266.5 MB/s | 229.8 MB/s | 39ns |
+| AXI RAM_CORE | Intermediate | 296.6 MB/s | 260.9 MB/s | 35ns |
+| AXI RAM_CORE | Maximum | 323.4 MB/s | 283.6 MB/s | 32ns |
+| AXI RAM_CORE | Aggressive | 336.4 MB/s | 295.6 MB/s | 31ns |
+| AXI RAM_EMU | Stock | 266.7 MB/s | 230.4 MB/s | 39ns |
+| AXI RAM_EMU | Intermediate | 297.2 MB/s | 256.8 MB/s | 35ns |
+| AXI RAM_EMU | Maximum | 323.8 MB/s | 279.9 MB/s | 32ns |
+| AXI RAM_EMU | Aggressive | 336.9 MB/s | 291.2 MB/s | 31ns |
+| AHB SRAM1/2 | Stock | 194.2 MB/s | 92.8 MB/s | 50ns |
+| AHB SRAM1/2 | Intermediate | 216.4 MB/s | 103.4 MB/s | 45ns |
+| AHB SRAM1/2 | Maximum | 235.8 MB/s | 112.7 MB/s | 41ns |
+| AHB SRAM1/2 | Aggressive | 245.3 MB/s | ~115-117 MB/s | 40ns |
+| NOR flash (SS:NONE) | Stock | 0.14 MB/s | 7.55 MB/s | 3.39us |
+| NOR flash (SS:HALFCYCLE) | Stock | 0.14 MB/s | 7.55 MB/s | 3.40us |
+| NOR flash (SS:HALFCYCLE) | Intermediate | 0.14 MB/s | 9.55 MB/s | 2.62us |
+| NOR flash (SS:HALFCYCLE) | Maximum | 0.14 MB/s | 10.39 MB/s | 2.53-2.73us |
+| NOR flash (SS:HALFCYCLE) | Aggressive | 0.14 MB/s | 10.82 MB/s | 2.44us |
+
+All rows PASS. PSRAM rows are absent here since it's physically removed on
+this board; when present, it reports its own indirect and memory-mapped
+read/write numbers per clock level and sample-shift setting.
+
+NOR's write number is a real erase+program+verify cycle against a small,
+fixed 64KB scratch region (`NOR_TEST_WRITE_OFFSET`/`_SIZE` in
+`gw_nor_test.h`) -- destructive to that region only, everything else on the
+chip is read-only. Its throughput stays flat (~0.14 MB/s) across every
+clock level because sector-erase time is a fixed internal chip operation,
+not bound to the SPI clock, so it dominates the measurement regardless of
+how fast the bus runs. NOR's read throughput does scale with clock level
+(7.55 -> 10.82 MB/s), matching how it's actually bottlenecked (bus speed,
+not chip-internal timing).
 
 ### Flashing (patched OpenOCD)
 
