@@ -67,11 +67,15 @@ static void nor_cmd(uint8_t instr, uint32_t addr, bool has_addr, uint8_t dummy,
 
     wdog_refresh();
 
-    /* No CS arbitration needed here: PE11 (hardware NCS) is NOR's original,
-     * unchanged CE#, and is only ever detached from the OSPI peripheral
-     * transiently inside a PSRAM command (see gw_ospi_bus.c) -- by the time
-     * control returns here it's already back under the peripheral's
-     * automatic control. */
+    /* NOR's CE# is PE11, the OSPI peripheral's own hardware NCS (AF11) --
+     * the board's stock, unmodified pin. PE9 is the pin piggybacked on
+     * for the PSRAM mod's plain-GPIO CS, not NOR's. The peripheral drives
+     * PE11 automatically for every transaction; this only works correctly
+     * as long as PE11 is actually left muxed to the OSPI AF function --
+     * see OspiBus_ProbePsram()'s cleanup in gw_ospi_bus.c, which restores
+     * that muxing after a failed PSRAM probe (it tries PE11 as one of its
+     * own candidates and would otherwise leave the pin parked as a plain
+     * input, silently breaking every NOR command issued afterward). */
     if (HAL_OSPI_Command(s_hospi, &c, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
         Error_Handler();
     }

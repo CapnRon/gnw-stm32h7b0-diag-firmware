@@ -197,15 +197,15 @@ void RamTest_RunAll(void)
     }
 
     {
-        /* Piggybacked NOR flash, original CE# (PE11 / hardware NCS,
-         * unchanged from stock). Deliberately read-only -- see
-         * gw_nor_test.h. size stays 0 so this entry isn't counted into the
-         * "Total tested" byte count below: presence + a small read-
-         * consistency check verify the chip and bus wiring, not its full
-         * capacity. */
+        /* NOR flash, original stock CE# (PE11, OSPI hardware NCS -- PE9
+         * is the pin piggybacked on for the PSRAM mod's plain-GPIO CS,
+         * not NOR's). Deliberately read-only -- see gw_nor_test.h. size
+         * stays 0 so this entry isn't counted into the "Total tested"
+         * byte count below: presence + a small read-consistency check
+         * verify the chip and bus wiring, not its full capacity. */
         ram_test_result_t *r = &s_results[s_result_count++];
         memset(r, 0, sizeof(*r));
-        r->name = "NOR flash (piggybacked, CS=PE11)";
+        r->name = "NOR flash (stock, CS=PE11)";
         r->start = 0;
         r->size = 0;
 

@@ -163,6 +163,16 @@ ospi_bus_psram_cs_t OspiBus_ProbePsram(void)
         return s_cs_mode;
     }
 
+    /* No PSRAM found on any candidate. Restore PE11 to the OSPI
+     * peripheral's hardware NCS function (its default, stock state from
+     * HAL_OSPI_MspInit()) before returning -- candidate 2/3 above parked
+     * it as a plain input, and leaving it that way silently breaks every
+     * other bus user that expects automatic hardware CS on PE11 (the
+     * stock NOR flash, in gw_nor_test.c). PC11/PE9 are left parked; only
+     * PE11 is a shared default other code relies on. */
+    cs_pe11_af();
+    cs_pe9_input_pullup();
+
     s_cs_mode = OSPI_BUS_PSRAM_CS_UNKNOWN;
     return s_cs_mode;
 }
