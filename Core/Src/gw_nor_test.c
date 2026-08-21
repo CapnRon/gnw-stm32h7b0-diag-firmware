@@ -36,6 +36,19 @@
 #define NOR_CMD_SE_4B 0x21u
 #define NOR_CMD_PP_3B 0x02u
 #define NOR_CMD_PP_4B 0x12u
+/* Block Erase 64K, 4-byte address -- matches gw_flash.c's
+ * cmds_quad_32b_mx CMD_ERASE3 (0xDC) exactly. The real driver's
+ * OSPI_Erase() always picks the LARGEST erase command that fits the
+ * requested region and address alignment (64K, then 32K, then 4K),
+ * not always 4K sectors -- see its erase_cmd[]/erase_sizes[] loop,
+ * checked i=3 downto i=0. NOR_TEST_WRITE_SIZE (64KB) is exactly one
+ * 64K block, at a 64K-aligned offset, so the real driver would erase
+ * it as ONE command here, not sixteen 4K sector erases. Doing it the
+ * naive way was producing an artificially inflated write-time number
+ * (16x the WREN/wait round-trip overhead a real erase of this region
+ * would never pay) -- not a fair comparison against PSRAM's erase-free
+ * write. */
+#define NOR_CMD_BE64K_4B 0xDCu
 #define NOR_STATUS_WIP 0x01u
 #define NOR_STATUS_WEL 0x02u
 #define NOR_STATUS_QE  0x40u
@@ -311,12 +324,30 @@ bool NorTest_Write(uint32_t address, size_t len)
         pattern[i] = (uint8_t)(i * 37u + 0xA5u);
     }
 
-    for (uint32_t off = 0; off < len; off += NOR_SECTOR_SIZE) {
-        nor_cmd_write(NOR_CMD_WREN, 0, false, NULL, 0);
-        nor_wait_wel();
-        nor_cmd_write(cmd_se, address + off, true, NULL, 0);
-        nor_wait_ready();
-        wdog_refresh();
+    /* Erase with the largest block that fits, largest-first, same as the
+     * real driver's OSPI_Erase() (checks 64K, then 32K, then 4K sectors
+     * against the remaining size and address alignment). Only 64K and 4K
+     * are wired up here since NOR_TEST_WRITE_SIZE is a 64K-aligned 64K
+     * region -- every byte gets covered by the 64K tier, the 4K tier
+     * never actually engages for this specific region, but stays as the
+     * correct fallback if that ever changes. */
+    {
+        uint32_t off = 0;
+        while (off < len) {
+            uint32_t remaining = len - off;
+            bool use_64k = s_addr32 && (remaining >= 0x10000u) &&
+                           (((address + off) & 0xFFFFu) == 0);
+            uint8_t erase_cmd = use_64k ? NOR_CMD_BE64K_4B : cmd_se;
+            uint32_t erase_size = use_64k ? 0x10000u : NOR_SECTOR_SIZE;
+
+            nor_cmd_write(NOR_CMD_WREN, 0, false, NULL, 0);
+            nor_wait_wel();
+            nor_cmd_write(erase_cmd, address + off, true, NULL, 0);
+            nor_wait_ready();
+            wdog_refresh();
+
+            off += erase_size;
+        }
     }
 
     for (uint32_t off = 0; off < len; off += NOR_PAGE_SIZE) {
