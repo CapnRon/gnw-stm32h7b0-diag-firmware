@@ -43,41 +43,94 @@ Results below are from a real board with the NOR flash reinstalled
 
 | Device | Clock level | Write | Read | Latency |
 |---|---|---|---|---|
-| DTCM Heap | Stock (280/64) | 266.4 MB/s | 266.2 MB/s | 29ns |
-| DTCM Heap | Intermediate (312/104) | 247.5 MB/s | 296.6 MB/s | 26ns |
-| DTCM Heap | Maximum (340/97) | 323.4 MB/s | 323.2 MB/s | 24ns |
+| DTCM Heap | Stock (280/64) | 266.5 MB/s | 266.3 MB/s | 29ns |
+| DTCM Heap | Intermediate (312/104) | 296.2 MB/s | 296.9 MB/s | 26ns |
+| DTCM Heap | Maximum (340/97) | 323.6 MB/s | 323.4 MB/s | 24ns |
 | DTCM Heap | Aggressive (354/101) | 336.4 MB/s | 336.2 MB/s | 23ns |
-| AXI RAM_CORE | Stock | 266.5 MB/s | 229.8 MB/s | 39ns |
-| AXI RAM_CORE | Intermediate | 296.6 MB/s | 260.9 MB/s | 35ns |
-| AXI RAM_CORE | Maximum | 323.4 MB/s | 283.6 MB/s | 32ns |
+| AXI RAM_CORE | Stock | 266.5 MB/s | 230.1 MB/s | 39ns |
+| AXI RAM_CORE | Intermediate | 297.0 MB/s | 256.6 MB/s | 35ns |
+| AXI RAM_CORE | Maximum | 323.2 MB/s | 279.1 MB/s | 32ns |
 | AXI RAM_CORE | Aggressive | 336.4 MB/s | 295.6 MB/s | 31ns |
-| AXI RAM_EMU | Stock | 266.7 MB/s | 230.4 MB/s | 39ns |
-| AXI RAM_EMU | Intermediate | 297.2 MB/s | 256.8 MB/s | 35ns |
-| AXI RAM_EMU | Maximum | 323.8 MB/s | 279.9 MB/s | 32ns |
+| AXI RAM_EMU | Stock | 266.7 MB/s | 230.6 MB/s | 39ns |
+| AXI RAM_EMU | Intermediate | 297.1 MB/s | 257.1 MB/s | 35ns |
+| AXI RAM_EMU | Maximum | 323.8 MB/s | 280.0 MB/s | 32ns |
 | AXI RAM_EMU | Aggressive | 336.9 MB/s | 291.2 MB/s | 31ns |
 | AHB SRAM1/2 | Stock | 194.2 MB/s | 92.8 MB/s | 50ns |
-| AHB SRAM1/2 | Intermediate | 216.4 MB/s | 103.4 MB/s | 45ns |
+| AHB SRAM1/2 | Intermediate | 216.3 MB/s | 103.4 MB/s | 45ns |
 | AHB SRAM1/2 | Maximum | 235.8 MB/s | 112.7 MB/s | 41ns |
 | AHB SRAM1/2 | Aggressive | 245.3 MB/s | ~115-117 MB/s | 40ns |
-| NOR flash (SS:NONE) | Stock | 0.14 MB/s | 7.55 MB/s | 3.39us |
-| NOR flash (SS:HALFCYCLE) | Stock | 0.14 MB/s | 7.55 MB/s | 3.40us |
-| NOR flash (SS:HALFCYCLE) | Intermediate | 0.14 MB/s | 9.55 MB/s | 2.62us |
-| NOR flash (SS:HALFCYCLE) | Maximum | 0.14 MB/s | 10.39 MB/s | 2.53-2.73us |
-| NOR flash (SS:HALFCYCLE) | Aggressive | 0.14 MB/s | 10.82 MB/s | 2.44us |
+| NOR flash, IO:SPI (indirect) | Stock | 0.20 MB/s | 7.55 MB/s | 3.46us |
+| NOR flash, IO:QUAD (indirect) | Stock | 0.20 MB/s | 8.81 MB/s | 5.11us |
+| NOR flash, IO:SPI (indirect) | Intermediate | 0.21 MB/s | 9.85 MB/s | 2.70us |
+| NOR flash, IO:QUAD (indirect) | Intermediate | 0.20 MB/s | 9.82 MB/s | 4.23us |
+| NOR flash, IO:SPI (indirect) | Maximum | 0.21 MB/s | 10.73 MB/s | 2.59us |
+| NOR flash, IO:QUAD (indirect) | Maximum | 0.21 MB/s | 10.70 MB/s | 4.00us |
+| NOR flash, **memory-mapped** | Stock | -- | 30.08 MB/s | 0.04us |
+| NOR flash, **memory-mapped** | Intermediate | -- | 48.89 MB/s | 0.03us |
+| NOR flash, **memory-mapped** | Maximum | -- | 45.66 MB/s | 0.03us |
 
 All rows PASS. PSRAM rows are absent here since it's physically removed on
 this board; when present, it reports its own indirect and memory-mapped
 read/write numbers per clock level and sample-shift setting.
 
-NOR's write number is a real erase+program+verify cycle against a small,
-fixed 64KB scratch region (`NOR_TEST_WRITE_OFFSET`/`_SIZE` in
-`gw_nor_test.h`) -- destructive to that region only, everything else on the
-chip is read-only. Its throughput stays flat (~0.14 MB/s) across every
-clock level because sector-erase time is a fixed internal chip operation,
-not bound to the SPI clock, so it dominates the measurement regardless of
-how fast the bus runs. NOR's read throughput does scale with clock level
-(7.55 -> 10.82 MB/s), matching how it's actually bottlenecked (bus speed,
-not chip-internal timing).
+### NOR: real reads are memory-mapped-only, real writes are indirect-only
+
+This is the actual, confirmed access pattern for NOR on this board's real
+game firmware (`gw_flash.c`, checked directly -- not inferred): **reads
+and writes never use the same mechanism.**
+
+- **Read is memory-mapped-only.** `OSPI_Init()` ends every boot by calling
+  `OSPI_EnableMemoryMappedMode()` and leaves it as the resting state.
+  Checked directly against the real driver's source: `OSPI_Read()`/
+  `OSPI_ReadBytes(CMD(READ), ...)`, the indirect bulk-read path, has
+  **zero callers anywhere in the codebase**. Every real data read --
+  ROM, assets, anything -- goes through the memory-mapped window. The
+  only indirect reads that exist at all are small control-plane ones:
+  RDID, RDSR, RDCR, SFDP (status/ID/config bytes, never bulk data).
+- **Write is indirect-only, always.** `OSPI_EnableMemoryMappedMode()`'s
+  write config deliberately reuses the *read* instruction, specifically
+  so a stray store through the mapped pointer re-reads instead of
+  programming the chip -- see the code comment, "in order to not alter
+  the flash by accident." There is no real memory-mapped NOR write path
+  in the stock driver at all. Every real write (`OSPI_WriteBytes()`,
+  `OSPI_PageProgram()`, `_OSPI_Erase()`) is an indirect command.
+
+This diag firmware's benchmark rows above reflect that split faithfully:
+the indirect NOR rows (SPI/QUAD) exist for a controlled apples-to-apples
+comparison against PSRAM's own indirect numbers, and the memory-mapped
+NOR row measures the access path real gameplay actually uses for reads.
+There is no memory-mapped NOR write row, and there will not be one --
+this isn't a missing feature, it reflects the same real limitation the
+stock driver works around. A memory-mapped write attempt was built and
+tested here (real hardware, both the DQS errata fix and the
+Strongly-Ordered MPU region that make PSRAM's memory-mapped writes work
+correctly, applied to NOR's write config the same way): every write was
+silently a complete no-op -- confirmed by reading back through the exact
+same mapped session immediately after the write, before any mode switch,
+still showing the pre-write erased value. Ruled out address/opcode
+mistakes (write config matched `gw_flash.c`'s `cmds_quad_32b_mx` CMD_PP
+exactly) and write-completion timing (added explicit WIP polling between
+every page write; made no difference). NOR's write config not working
+the same way PSRAM's does is not obviously wrong given how the two chips
+differ (PSRAM is genuine RAM with no internal write-completion latency
+to race against; NOR's real per-page program time has no way to
+interleave with an automatic hardware burst the way indirect mode's
+explicit WIP poll between commands provides) -- but the specific
+mechanism was not conclusively identified, and this was not pursued
+further once it became clear the reference driver never attempts this
+either.
+
+Beyond the write-side split, NOR's read speed itself has two very
+different profiles depending on how it's accessed: indirect reads are
+throttled by fixed per-command overhead regardless of SPI mode (SPI vs
+QUAD barely differ -- 8.81 vs 7.55 MB/s at Stock, QUAD actually *slower*
+at higher clock levels once its extra dummy cycles stop being hidden by
+a larger transfer), while memory-mapped reads have no such overhead and
+reach 30-49 MB/s, matching PSRAM's own throughput almost exactly since
+both chips share the same OCTOSPI1 peripheral. Real gameplay only ever
+sees the memory-mapped number -- the indirect rows exist purely for a
+controlled, apples-to-apples SPI-vs-QUAD comparison, not because
+gameplay experiences indirect-mode NOR reads at all.
 
 ### Flashing (patched OpenOCD)
 
