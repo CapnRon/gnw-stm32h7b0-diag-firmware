@@ -38,6 +38,15 @@
 #define NOR_CMD_PP_4B 0x12u
 #define NOR_STATUS_WIP 0x01u
 #define NOR_STATUS_WEL 0x02u
+#define NOR_STATUS_QE  0x40u
+/* Quad read, 4-byte address (4 address lines + 4 data lines), 6 dummy
+ * cycles -- matches gw_flash.c's cmds_quad_32b_mx CMD_READ exactly,
+ * confirmed against the real installed MX25U51245G. This is what this
+ * board's actual game firmware uses; the single-line opcodes above are
+ * a diagnostic-tool-only simplification. Requires the chip's QE status
+ * bit -- see nor_ensure_quad_enabled(). */
+#define NOR_CMD_READ_QUAD_4B 0xECu
+#define NOR_QUAD_READ_DUMMY  6u
 
 typedef struct {
     uint8_t     id[3];
@@ -119,6 +128,40 @@ static void nor_cmd(uint8_t instr, uint32_t addr, bool has_addr, uint8_t dummy,
     }
 }
 
+/* Quad read (4-byte address, 4 data lines, 6 dummy cycles) -- the real
+ * opcode/framing this board's game firmware uses, unlike nor_cmd()'s
+ * single-line default. See NOR_CMD_READ_QUAD_4B's comment. */
+static void nor_cmd_read_quad(uint32_t addr, uint8_t *data, size_t len)
+{
+    OSPI_RegularCmdTypeDef c;
+    memset(&c, 0, sizeof(c));
+
+    c.OperationType      = HAL_OSPI_OPTYPE_COMMON_CFG;
+    c.FlashId             = 0;
+    c.Instruction          = NOR_CMD_READ_QUAD_4B;
+    c.InstructionSize      = HAL_OSPI_INSTRUCTION_8_BITS;
+    c.InstructionMode      = HAL_OSPI_INSTRUCTION_1_LINE;
+    c.AddressMode          = HAL_OSPI_ADDRESS_4_LINES;
+    c.AddressSize          = HAL_OSPI_ADDRESS_32_BITS;
+    c.Address              = addr;
+    c.AlternateBytesMode   = HAL_OSPI_ALTERNATE_BYTES_NONE;
+    c.DummyCycles          = NOR_QUAD_READ_DUMMY;
+    c.DataMode             = HAL_OSPI_DATA_4_LINES;
+    c.NbData               = len;
+    c.DQSMode              = HAL_OSPI_DQS_DISABLE;
+    c.SIOOMode             = HAL_OSPI_SIOO_INST_EVERY_CMD;
+    c.InstructionDtrMode   = HAL_OSPI_INSTRUCTION_DTR_DISABLE;
+
+    wdog_refresh();
+
+    if (HAL_OSPI_Command(s_hospi, &c, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+        Error_Handler();
+    }
+    if (HAL_OSPI_Receive(s_hospi, data, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+        Error_Handler();
+    }
+}
+
 /* Same command/address framing as nor_cmd(), but transmits `data` instead
  * of receiving it -- used for WREN (len=0) and Page Program (len>0). */
 static void nor_cmd_write(uint8_t instr, uint32_t addr, bool has_addr,
@@ -178,6 +221,25 @@ static void nor_wait_wel(void)
     } while (!(sr & NOR_STATUS_WEL));
 }
 
+/* Quad read needs the chip's QE status bit set -- mirrors gw_flash.c's
+ * init_mx_issi(). QE is non-volatile (persists across resets), so this
+ * is a no-op after the first call in most sessions, but never assume it
+ * -- a freshly power-cycled or never-before-quad-used chip needs this. */
+static void nor_ensure_quad_enabled(void)
+{
+    uint8_t sr;
+    nor_cmd(NOR_CMD_RDSR, 0, false, 0, &sr, 1);
+    if (sr & NOR_STATUS_QE) {
+        return;
+    }
+
+    uint8_t wr_status = NOR_STATUS_QE;
+    nor_cmd_write(NOR_CMD_WREN, 0, false, NULL, 0);
+    nor_wait_wel();
+    nor_cmd_write(0x01u /* WRSR */, 0, false, &wr_status, 1);
+    nor_wait_ready();
+}
+
 void NorTest_Init(OSPI_HandleTypeDef *hospi)
 {
     s_hospi = hospi;
@@ -213,12 +275,20 @@ bool NorTest_ReadConsistency(uint32_t address, uint8_t len)
 
 #define NOR_READ_CHUNK 4096u
 
-void NorTest_Read(uint32_t address, uint8_t *data, size_t len)
+void NorTest_Read(uint32_t address, uint8_t *data, size_t len, bool quad)
 {
+    if (quad && s_addr32) {
+        nor_ensure_quad_enabled();
+    }
+
     while (len > 0) {
         uint32_t n = (len < NOR_READ_CHUNK) ? (uint32_t)len : NOR_READ_CHUNK;
 
-        nor_cmd(nor_read_opcode(), address, true, 0, data, n);
+        if (quad && s_addr32) {
+            nor_cmd_read_quad(address, data, n);
+        } else {
+            nor_cmd(nor_read_opcode(), address, true, 0, data, n);
+        }
 
         address += n;
         data += n;

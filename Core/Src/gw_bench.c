@@ -16,7 +16,7 @@
 static bench_row_t s_sram[BENCH_MAX_SRAM_REGIONS][BENCH_CLK_LEVEL_COUNT];
 static int         s_sram_region_count;
 static bench_row_t s_psram[BENCH_CLK_LEVEL_COUNT][2][2]; /* [level][sample_shift][io_quad] */
-static bench_row_t s_nor[BENCH_CLK_LEVEL_COUNT][2];
+static bench_row_t s_nor[BENCH_CLK_LEVEL_COUNT][2][2]; /* [level][sample_shift][io_quad] */
 static bench_row_t s_psram_mmap[BENCH_CLK_LEVEL_COUNT][2]; /* [level][sample_shift], quad-only */
 static bool        s_psram_mmap_available; /* CS is PE11/PC11, not PE9 */
 static bool        s_psram_present;
@@ -296,7 +296,7 @@ static bool bench_psram(bench_row_t *out, bool quad)
     return pass;
 }
 
-static bool bench_nor(bench_row_t *out)
+static bool bench_nor(bench_row_t *out, bool quad)
 {
     static uint8_t buf[4096];
     /* Bounded to stay well within even the smallest part in gw_nor_test.c's
@@ -311,14 +311,14 @@ static bool bench_nor(bench_row_t *out)
 
     {
         uint8_t a[64], b[64];
-        NorTest_Read(0, a, sizeof(a));
-        NorTest_Read(0, b, sizeof(b));
+        NorTest_Read(0, a, sizeof(a), quad);
+        NorTest_Read(0, b, sizeof(b), quad);
         pass = (memcmp(a, b, sizeof(a)) == 0);
     }
 
     for (uint32_t off = 0; off < total; off += sizeof(buf)) {
         uint32_t t0 = dwt_now();
-        NorTest_Read(off, buf, sizeof(buf));
+        NorTest_Read(off, buf, sizeof(buf), quad);
         uint32_t t1 = dwt_now();
         read_cycles += (t1 - t0);
         wdog_refresh();
@@ -347,7 +347,7 @@ static bool bench_nor(bench_row_t *out)
         uint8_t tiny[4];
         uint32_t t0 = dwt_now();
         for (int i = 0; i < reps; i++) {
-            NorTest_Read(0, tiny, sizeof(tiny));
+            NorTest_Read(0, tiny, sizeof(tiny), quad);
         }
         uint32_t t1 = dwt_now();
         out->latency_ns = cycles_to_ns(t1 - t0) / reps;
@@ -499,7 +499,9 @@ void BenchTest_RunAll(void)
                     }
                 }
                 memset(&s_psram_mmap[level][ss], 0, sizeof(bench_row_t));
-                memset(&s_nor[level][ss], 0, sizeof(bench_row_t));
+                for (int io = 0; io < 2; io++) {
+                    memset(&s_nor[level][ss][io], 0, sizeof(bench_row_t));
+                }
                 continue;
             }
 
@@ -551,20 +553,24 @@ void BenchTest_RunAll(void)
             }
 
             if (s_nor_present) {
-                bench_row_t *out = &s_nor[level][ss];
-                memset(out, 0, sizeof(*out));
-                out->device_name = "NOR flash";
-                out->clk_level = level;
-                out->sample_shift = (ss != 0);
-                out->applicable = true;
+                for (int io = 0; io < 2; io++) {
+                    bench_row_t *out = &s_nor[level][ss][io];
+                    memset(out, 0, sizeof(*out));
+                    out->device_name = "NOR flash";
+                    out->clk_level = level;
+                    out->sample_shift = (ss != 0);
+                    out->io_quad = (io != 0);
+                    out->applicable = true;
 
-                bench_nor(out);
-                out->ran = true;
+                    bench_nor(out, io != 0);
+                    out->ran = true;
 
-                printf("BENCH: NOR flash      lvl=%u(%s) SS=%-9s W=%.2fMB/s R=%.2fMB/s Lat=%.2fus %s\n",
-                       level, s_level_name[level], ss ? "HALFCYCLE" : "NONE",
-                       out->write_mb_s, out->read_mb_s, out->latency_ns / 1000.0f,
-                       out->pass ? "PASS" : "FAIL");
+                    printf("BENCH: NOR flash      lvl=%u(%s) SS=%-9s IO=%-4s W=%.2fMB/s R=%.2fMB/s Lat=%.2fus %s\n",
+                           level, s_level_name[level], ss ? "HALFCYCLE" : "NONE",
+                           io ? "QUAD" : "SPI",
+                           out->write_mb_s, out->read_mb_s, out->latency_ns / 1000.0f,
+                           out->pass ? "PASS" : "FAIL");
+                }
             }
         }
     }
@@ -647,16 +653,19 @@ void BenchTest_DrawReport(int x, int y, int width)
 
     for (int ss = 0; ss < 2; ss++) {
         if (!s_nor_present) break;
-        bench_row_t *row = &s_nor[s_page][ss];
-        uint16_t color = row->ran ? (row->pass ? 0x07E0 : 0xF800) : 0x8410;
+        for (int io = 0; io < 2; io++) {
+            bench_row_t *row = &s_nor[s_page][ss][io];
+            uint16_t color = row->ran ? (row->pass ? 0x07E0 : 0xF800) : 0x8410;
 
-        fmt_latency(lat, sizeof(lat), row->latency_ns);
-        snprintf(buf, sizeof(buf), "NOR   SS:%-9s %s", ss ? "HALFCYCLE" : "NONE",
-                 row->ran ? (row->pass ? "PASS" : "FAIL") : "--");
-        line_y += odroid_overlay_draw_text(x, line_y, width, buf, color, 0x0000);
-        snprintf(buf, sizeof(buf), "  W:%.1f R:%.1f MB/s Lat:%s",
-                 row->write_mb_s, row->read_mb_s, lat);
-        line_y += odroid_overlay_draw_text(x, line_y, width, buf, 0xFFFF, 0x0000);
+            fmt_latency(lat, sizeof(lat), row->latency_ns);
+            snprintf(buf, sizeof(buf), "NOR SS:%c IO:%c %-4s",
+                     ss ? 'H' : 'N', io ? 'Q' : 'S',
+                     row->ran ? (row->pass ? "PASS" : "FAIL") : "--");
+            line_y += odroid_overlay_draw_text(x, line_y, width, buf, color, 0x0000);
+            snprintf(buf, sizeof(buf), "  W:%.1f R:%.1f MB/s Lat:%s",
+                     row->write_mb_s, row->read_mb_s, lat);
+            line_y += odroid_overlay_draw_text(x, line_y, width, buf, 0xFFFF, 0x0000);
+        }
     }
 
     snprintf(buf, sizeof(buf), "<LEFT/RIGHT> page %d/%d", s_page + 1, BENCH_CLK_LEVEL_COUNT);

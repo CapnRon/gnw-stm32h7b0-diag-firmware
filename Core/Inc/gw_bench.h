@@ -14,7 +14,7 @@ typedef struct {
     const char *device_name;    /* "DTCM Heap", "PSRAM", "NOR flash", ... */
     uint8_t     clk_level;      /* 0-3, see BENCH_CLK_LEVEL_COUNT */
     bool        sample_shift;   /* false=NONE, true=HALFCYCLE (OSPI devices only) */
-    bool        io_quad;        /* false=SPI (1-1-1), true=Quad (1-4-4) -- PSRAM only */
+    bool        io_quad;        /* false=SPI (1-1-1), true=Quad (1-4-4) -- PSRAM and NOR */
     bool        applicable;     /* false = this axis doesn't apply to this device
                                   * (e.g. internal SRAM under the sample-shift axis) */
     bool        ran;            /* false if skipped (device not detected) */

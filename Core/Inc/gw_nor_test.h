@@ -55,7 +55,16 @@ bool NorTest_ReadConsistency(uint32_t address, uint8_t len);
  * SPI reads, but chunking keeps each HAL_OSPI transaction and its timeout
  * bounded). Read-only, safe on any NOR content -- used by the benchmark for
  * throughput/latency measurement, not correctness (see NorTest_ReadConsistency
- * for that). */
-void NorTest_Read(uint32_t address, uint8_t *data, size_t len);
+ * for that).
+ *
+ * `quad` selects the real read opcode this board's actual game firmware
+ * uses (`0xEC`, 4 data lines -- see gw_flash.c's cmds_quad_32b_mx table,
+ * confirmed against the MX25U51245G) instead of the single-line opcode
+ * (`0x13`/`0x03`) this module otherwise defaults to for chip-agnostic
+ * safety. Quad mode requires the chip's QE status bit; this function
+ * enables it on first use if not already set (persists across resets,
+ * it's a non-volatile bit). Only applies on 32-bit-addressed parts
+ * (s_addr32) -- `quad` is silently ignored on 24-bit parts. */
+void NorTest_Read(uint32_t address, uint8_t *data, size_t len, bool quad);
 
 #endif
