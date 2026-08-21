@@ -67,4 +67,30 @@ bool NorTest_ReadConsistency(uint32_t address, uint8_t len);
  * (s_addr32) -- `quad` is silently ignored on 24-bit parts. */
 void NorTest_Read(uint32_t address, uint8_t *data, size_t len, bool quad);
 
+/* Memory-mapped (XIP) read at NOR_MMAP_BASE + offset -- how this board's
+ * real game firmware actually reads NOR (gw_flash.c's OSPI_Init() ends
+ * every boot by calling OSPI_EnableMemoryMappedMode() and leaves it as
+ * the resting state; ROM/asset access is `*(ptr)` through this window,
+ * never chunked indirect commands like NorTest_Read() above). The OSPI
+ * peripheral autonomously issues command+address+dummy+data for every
+ * CPU access, with none of NorTest_Read()'s per-chunk HAL call overhead
+ * -- this is the number that actually matters for real-world NOR
+ * throughput, not the indirect one.
+ *
+ * Read-only: the write config here deliberately reuses the read
+ * instruction (matching gw_flash.c's own safety pattern) so an
+ * accidental store through the mapped pointer re-triggers a read
+ * instead of corrupting the chip -- there is no memory-mapped NOR write
+ * support in this module, unlike PSRAM's.
+ *
+ * Same NCS/AF-muxing caveat as PSRAM's memory-mapped mode: the OSPI
+ * peripheral can't be reinitialized while this is active. Always pairs
+ * with NorTest_DisableMemoryMapped() before any other OSPI use
+ * (indirect NOR commands, PSRAM, a clock/OSPI reinit). Returns false
+ * (and does not enable anything) if quad mode isn't available on this
+ * part (24-bit-addressed chips -- see s_addr32 in the .c file). */
+#define NOR_MMAP_BASE 0x90000000u
+bool NorTest_EnableMemoryMapped(void);
+void NorTest_DisableMemoryMapped(void);
+
 #endif

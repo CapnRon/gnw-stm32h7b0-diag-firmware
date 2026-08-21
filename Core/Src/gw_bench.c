@@ -19,6 +19,7 @@ static bench_row_t s_psram[BENCH_CLK_LEVEL_COUNT][2][2]; /* [level][sample_shift
 static bench_row_t s_nor[BENCH_CLK_LEVEL_COUNT][2][2]; /* [level][sample_shift][io_quad] */
 static bench_row_t s_psram_mmap[BENCH_CLK_LEVEL_COUNT][2]; /* [level][sample_shift], quad-only */
 static bool        s_psram_mmap_available; /* CS is PE11/PC11, not PE9 */
+static bench_row_t s_nor_mmap[BENCH_CLK_LEVEL_COUNT][2]; /* [level][sample_shift], quad-only */
 static bool        s_psram_present;
 static bool        s_nor_present;
 static int         s_page;
@@ -70,9 +71,11 @@ static void reinit_ospi(bool sample_shift)
     OSPIM_CfgTypeDef sOspiManagerCfg = {0};
 
     /* Safety net: the peripheral can't be reinitialized while a
-     * memory-mapped session is open. bench_psram_mmap() already disables
-     * it before returning, but this guards any future caller too. */
+     * memory-mapped session is open. bench_psram_mmap()/bench_nor_mmap()
+     * already disable their own before returning, but this guards any
+     * future caller too. */
     PSRAM_DisableMemoryMapped();
+    NorTest_DisableMemoryMapped();
 
     HAL_OSPI_DeInit(&hospi1);
 
@@ -356,6 +359,66 @@ static bool bench_nor(bench_row_t *out, bool quad)
     return pass;
 }
 
+/* Memory-mapped (XIP) NOR read -- how this board's real game firmware
+ * actually reads NOR (see NorTest_EnableMemoryMapped()'s doc comment).
+ * Read-only: no memory-mapped NOR write support exists in this module.
+ * Correctness is checked against a reference read taken via the
+ * already-proven indirect quad path (NorTest_Read) before enabling
+ * memory-mapped mode, since indirect commands can't be issued while
+ * it's active. */
+static bool bench_nor_mmap(bench_row_t *out)
+{
+    static uint32_t buf[4096 / 4];
+    static uint8_t reference[64];
+    const uint32_t total = 256u * 1024u;
+    uint32_t read_cycles = 0;
+    bool pass;
+
+    NorTest_Read(0, reference, sizeof(reference), true);
+
+    if (!NorTest_EnableMemoryMapped()) {
+        out->ran = false;
+        return false;
+    }
+
+    dwt_enable();
+
+    for (uint32_t off = 0; off < total; off += sizeof(buf)) {
+        volatile uint32_t *p = (volatile uint32_t *)(NOR_MMAP_BASE + off);
+        uint32_t t0 = dwt_now();
+        for (uint32_t w = 0; w < sizeof(buf) / 4; w++) {
+            buf[w] = p[w];
+        }
+        uint32_t t1 = dwt_now();
+        read_cycles += (t1 - t0);
+        wdog_refresh();
+    }
+
+    pass = (memcmp((const void *)NOR_MMAP_BASE, reference, sizeof(reference)) == 0);
+
+    {
+        const int reps = 64;
+        volatile uint32_t *p = (volatile uint32_t *)NOR_MMAP_BASE;
+        uint32_t sink = 0;
+        uint32_t t0 = dwt_now();
+        for (int i = 0; i < reps; i++) {
+            sink += p[0];
+        }
+        uint32_t t1 = dwt_now();
+        (void)sink;
+        out->latency_ns = cycles_to_ns(t1 - t0) / reps;
+    }
+
+    NorTest_DisableMemoryMapped();
+
+    out->read_mb_s = cycles_to_mb_s(read_cycles, total);
+    out->write_mb_s = 0.0f;
+    out->writable = false;
+    out->pass = pass;
+
+    return pass;
+}
+
 /* Memory-mapped (XIP) PSRAM read+write benchmark. Real reads AND writes,
  * straight through the mapped pointer at PSRAM_MMAP_BASE. Getting here
  * took two wrong turns, both worth keeping on record:
@@ -502,6 +565,7 @@ void BenchTest_RunAll(void)
                 for (int io = 0; io < 2; io++) {
                     memset(&s_nor[level][ss][io], 0, sizeof(bench_row_t));
                 }
+                memset(&s_nor_mmap[level][ss], 0, sizeof(bench_row_t));
                 continue;
             }
 
@@ -568,6 +632,24 @@ void BenchTest_RunAll(void)
                     printf("BENCH: NOR flash      lvl=%u(%s) SS=%-9s IO=%-4s W=%.2fMB/s R=%.2fMB/s Lat=%.2fus %s\n",
                            level, s_level_name[level], ss ? "HALFCYCLE" : "NONE",
                            io ? "QUAD" : "SPI",
+                           out->write_mb_s, out->read_mb_s, out->latency_ns / 1000.0f,
+                           out->pass ? "PASS" : "FAIL");
+                }
+
+                {
+                    bench_row_t *out = &s_nor_mmap[level][ss];
+                    memset(out, 0, sizeof(*out));
+                    out->device_name = "NOR(mm)";
+                    out->clk_level = level;
+                    out->sample_shift = (ss != 0);
+                    out->io_quad = true;
+                    out->applicable = true;
+
+                    bench_nor_mmap(out);
+                    out->ran = true;
+
+                    printf("BENCH: NOR(mmap)      lvl=%u(%s) SS=%-9s W=%.2fMB/s R=%.2fMB/s Lat=%.2fus %s\n",
+                           level, s_level_name[level], ss ? "HALFCYCLE" : "NONE",
                            out->write_mb_s, out->read_mb_s, out->latency_ns / 1000.0f,
                            out->pass ? "PASS" : "FAIL");
                 }
@@ -666,6 +748,19 @@ void BenchTest_DrawReport(int x, int y, int width)
                      row->write_mb_s, row->read_mb_s, lat);
             line_y += odroid_overlay_draw_text(x, line_y, width, buf, 0xFFFF, 0x0000);
         }
+    }
+
+    for (int ss = 0; ss < 2; ss++) {
+        if (!s_nor_present) break;
+        bench_row_t *row = &s_nor_mmap[s_page][ss];
+        uint16_t color = row->ran ? (row->pass ? 0x07E0 : 0xF800) : 0x8410;
+
+        fmt_latency(lat, sizeof(lat), row->latency_ns);
+        snprintf(buf, sizeof(buf), "NOR(mm) SS:%c %-4s W:%.1f R:%.1f %s",
+                 ss ? 'H' : 'N',
+                 row->ran ? (row->pass ? "PASS" : "FAIL") : "--",
+                 row->write_mb_s, row->read_mb_s, lat);
+        line_y += odroid_overlay_draw_text(x, line_y, width, buf, color, 0x0000);
     }
 
     snprintf(buf, sizeof(buf), "<LEFT/RIGHT> page %d/%d", s_page + 1, BENCH_CLK_LEVEL_COUNT);

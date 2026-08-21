@@ -78,6 +78,7 @@ static const nor_id_entry_t nor_id_table[] = {
 
 static OSPI_HandleTypeDef *s_hospi;
 static bool s_addr32; /* set once ReadID identifies the part; defaults to 24-bit */
+static bool s_mmap_active;
 
 static uint8_t nor_read_opcode(void)
 {
@@ -334,4 +335,66 @@ bool NorTest_Write(uint32_t address, size_t len)
     }
 
     return true;
+}
+
+bool NorTest_EnableMemoryMapped(void)
+{
+    if (s_mmap_active) {
+        return true;
+    }
+    if (!s_addr32) {
+        /* No quad memory-mapped config wired up for 24-bit parts. */
+        return false;
+    }
+
+    nor_ensure_quad_enabled();
+
+    OSPI_RegularCmdTypeDef c;
+    OSPI_MemoryMappedTypeDef mm;
+    memset(&c, 0, sizeof(c));
+
+    c.FlashId             = 0;
+    c.Instruction          = NOR_CMD_READ_QUAD_4B;
+    c.InstructionSize      = HAL_OSPI_INSTRUCTION_8_BITS;
+    c.InstructionMode      = HAL_OSPI_INSTRUCTION_1_LINE;
+    c.AddressMode          = HAL_OSPI_ADDRESS_4_LINES;
+    c.AddressSize          = HAL_OSPI_ADDRESS_32_BITS;
+    c.AlternateBytesMode   = HAL_OSPI_ALTERNATE_BYTES_NONE;
+    c.DummyCycles          = NOR_QUAD_READ_DUMMY;
+    c.DataMode             = HAL_OSPI_DATA_4_LINES;
+    c.DQSMode              = HAL_OSPI_DQS_DISABLE;
+    c.SIOOMode             = HAL_OSPI_SIOO_INST_EVERY_CMD;
+    c.InstructionDtrMode   = HAL_OSPI_INSTRUCTION_DTR_DISABLE;
+
+    c.OperationType = HAL_OSPI_OPTYPE_READ_CFG;
+    if (HAL_OSPI_Command(s_hospi, &c, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+        Error_Handler();
+    }
+
+    /* Write config reuses the read instruction, matching gw_flash.c's own
+     * approach -- there is no real memory-mapped write path here, this
+     * only exists so an accidental store re-reads instead of programming
+     * the chip. */
+    c.OperationType = HAL_OSPI_OPTYPE_WRITE_CFG;
+    if (HAL_OSPI_Command(s_hospi, &c, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+        Error_Handler();
+    }
+
+    mm.TimeOutActivation = HAL_OSPI_TIMEOUT_COUNTER_DISABLE;
+    mm.TimeOutPeriod = 0;
+    if (HAL_OSPI_MemoryMapped(s_hospi, &mm) != HAL_OK) {
+        Error_Handler();
+    }
+
+    s_mmap_active = true;
+    return true;
+}
+
+void NorTest_DisableMemoryMapped(void)
+{
+    if (!s_mmap_active) {
+        return;
+    }
+    HAL_OSPI_Abort(s_hospi);
+    s_mmap_active = false;
 }
